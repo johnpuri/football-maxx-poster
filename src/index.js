@@ -9,6 +9,7 @@ import { fetchScorebatHighlights, filterAndRankScorebat } from "./scorebat.js";
 import { createFacebookPost } from "./zernio.js";
 import { formatPost } from "./formatter.js";
 import { getRandomHistoricalPick, finalToHighlight, pickRandomYear, TOURNAMENTS } from "./historical.js";
+import { isCartoonVideoSync, isCartoonVideo, pickFirstRealVideo } from "./cartoonFilter.js";
 import fs from "fs";
 import { execSync } from "child_process";
 
@@ -96,12 +97,75 @@ async function getHighlights() {
 }
 
 function tryYtDlpSearch(query) {
+  // Filtered variant below is preferred; keep sync fallback for compat
+  const url = tryYtDlpSearchFilteredSync(query);
+  return url;
+}
+
+function tryYtDlpSearchFilteredSync(query) {
   try {
-    // yt-dlp ytsearch1 returns first result URL; --get-id prints video id
+    // Fetch up to 5 candidates and skip cartoon/animated via keyword filter (sync)
+    const out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+    const lines = out.split("\n").filter(Boolean);
+    // yt-dlp --get-id --get-title emits: title \n id \n title \n id ...
+    // Actually with both flags it prints title then id per entry
+    const candidates = [];
+    for (let i = 0; i < lines.length - 1; i += 2) {
+      const title = lines[i];
+      const id = lines[i + 1];
+      if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title });
+    }
+    // If parsing didn't yield pairs, fall back to id-only
+    if (!candidates.length) {
+      const ids = out.split("\n").map(s => s.trim()).filter(s => /^[A-Za-z0-9_-]{6,}$/.test(s));
+      for (const id of ids) candidates.push({ id, title: "" });
+    }
+    for (const c of candidates) {
+      if (isCartoonVideoSync(c.title, "")) {
+        console.log(`[cartoonFilter] skipping cartoon (keyword): ${c.id} — ${c.title}`);
+        continue;
+      }
+      return `https://www.youtube.com/watch?v=${c.id}`;
+    }
+    // fallback: first id if all filtered (should not happen)
+    if (candidates.length) return `https://www.youtube.com/watch?v=${candidates[0].id}`;
+  } catch {}
+  // Fallback to single search
+  try {
     const id = execSync(`yt-dlp "ytsearch1:${query}" --get-id --no-warnings 2>/dev/null | head -n1`, { timeout: 15000, encoding: "utf8" }).trim();
     if (id && /^[A-Za-z0-9_-]{6,}$/.test(id)) return `https://www.youtube.com/watch?v=${id}`;
   } catch {}
   return "";
+}
+
+// Async version that also does Kimi WebBridge vision check on thumbnail (real match footage only)
+export async function tryYtDlpSearchFiltered(query) {
+  try {
+    const out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+    const lines = out.split("\n").filter(Boolean);
+    const candidates = [];
+    for (let i = 0; i < lines.length - 1; i += 2) {
+      const title = lines[i];
+      const id = lines[i + 1];
+      if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
+    }
+    if (!candidates.length) {
+      const ids = out.split("\n").map(s => s.trim()).filter(s => /^[A-Za-z0-9_-]{6,}$/.test(s));
+      for (const id of ids) candidates.push({ id, title: "", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
+    }
+    for (const c of candidates) {
+      const isCartoon = await isCartoonVideo(c.title, "", c.thumbnail);
+      if (isCartoon) {
+        console.log(`[cartoonFilter] skipping cartoon (keyword+vision): ${c.id} — ${c.title}`);
+        continue;
+      }
+      return `https://www.youtube.com/watch?v=${c.id}`;
+    }
+    if (candidates.length) return `https://www.youtube.com/watch?v=${candidates[0].id}`;
+  } catch (e) {
+    console.warn("tryYtDlpSearchFiltered failed:", e.message);
+  }
+  return tryYtDlpSearchFilteredSync(query);
 }
 
 async function main() {
@@ -112,12 +176,21 @@ async function main() {
   console.log(`Found ${highlights.length} highlights`);
 
   const fresh = highlights.filter((h) => !posted.has(h.id)).slice(0, config.maxHighlightsPerRun);
-  if (!fresh.length) {
+  // Cartoon filter: drop any highlight whose title/description looks cartoon/animated
+  const filteredFresh = fresh.filter(h => {
+    if (isCartoonVideoSync(h.title || "", h.description || h.league || "")) {
+      console.log(`[cartoonFilter] skipping post (cartoon): ${h.title}`);
+      return false;
+    }
+    return true;
+  });
+  const toPost = filteredFresh.length ? filteredFresh : [];
+  if (!toPost.length) {
     console.log("No fresh highlights to post (all already posted or none found).");
     return;
   }
   console.log(`Posting ${fresh.length} fresh highlights...`);
-  for (const h of fresh) {
+  for (const h of toPost) {
     const content = formatPost(h);
     console.log("\n---");
     console.log(content);

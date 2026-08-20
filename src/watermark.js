@@ -6,6 +6,7 @@ import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { tournamentLogoMap, getTournamentLogoPath } from "./config.js";
+import { isCartoonVideoSync } from "./cartoonFilter.js";
 
 export const WATERMARK_POS = "top-right"; // default
 export const WATERMARK_SIZE = 80;
@@ -100,6 +101,10 @@ export function applyWatermark(input, watermarkImg, output, opts = {}) {
  * Returns output path.
  */
 export function applyDynamicWatermark(input, opts = {}) {
+  // Cartoon filter: if opts.title suggests cartoon/animated, abort early so caller can pick next video
+  if (opts.title && isCartoonVideoSync(opts.title, "")) {
+    throw new Error(`applyDynamicWatermark blocked cartoon/animated video: ${opts.title}`);
+  }
   const tournament = opts.tournament || "EURO";
   const year = opts.year || 2008;
   const teamA = opts.teamA || "Germany";
