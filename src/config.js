@@ -14,6 +14,27 @@ export const PRIORITY_LEAGUES = [
   { name: "Copa America", keys: ["copa america"] },
 ];
 
+export const tournamentLogoMap = {
+  "EURO_2008": "/tmp/euro2008_logo.png",
+  "EURO": "/tmp/euro2008_logo.png",
+  "WORLD_CUP_2006": "/tmp/worldcup2006_logo.png",
+  "WORLD_CUP": "/tmp/worldcup_logo.png",
+  "CHAMPIONS_LEAGUE": "/tmp/ucl_logo.png",
+  "COPA_AMERICA": "/tmp/copa_logo.png",
+  "GENERIC": "/tmp/generic_logo.png",
+};
+
+export function getTournamentLogoPath(tournament, year) {
+  if (!tournament) return tournamentLogoMap.GENERIC;
+  const t = tournament.toString().trim().toUpperCase().replace(/\s+/g, "_");
+  const keyWithYear = year ? `${t}_${year}` : t;
+  if (tournamentLogoMap[keyWithYear]) return tournamentLogoMap[keyWithYear];
+  if (tournamentLogoMap[t]) return tournamentLogoMap[t];
+  // fallback convention path
+  const candidate = `/tmp/${t}${year ? "_" + year : ""}_logo.png`;
+  return candidate;
+}
+
 export const config = {
   zernioApiKey: process.env.ZERNIO_API_KEY || "",
   zernioBaseUrl: process.env.ZERNIO_BASE_URL || "https://zernio.com/api/v1",
