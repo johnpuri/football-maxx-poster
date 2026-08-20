@@ -55,7 +55,7 @@ export function applyEnhancedWatermark(input, watermarkImg, logoImg, output, opt
   }
 
   const filter = [
-    `[1:v]scale=140:140:flags=lanczos:force_original_aspect_ratio=increase,crop=140:140,format=rgba,colorchannelmixer=aa=0.85[wm]`,
+    `[1:v]scale=140:140:flags=lanczos:force_original_aspect_ratio=increase,crop=140:140,format=rgba,colorchannelmixer=aa=0.6[wm]`,
     `[2:v]scale=-1:100:flags=lanczos[logo]`,
     baseFilter,
     `[base][logo]overlay=10:10[withlogo]`,
