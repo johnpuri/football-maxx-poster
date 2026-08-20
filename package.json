@@ -1,0 +1,20 @@
+{
+  "name": "football-maxx-poster",
+  "version": "1.0.0",
+  "description": "Automated football highlights poster for Football Maxx Facebook Page — Highlightly + ScoreBat → Zernio",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "post": "node src/post.js",
+    "dry-run": "DRY_RUN=true node src/index.js",
+    "test": "node --test",
+    "lint": "echo 'no linter configured'"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
