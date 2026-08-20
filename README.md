@@ -98,3 +98,12 @@ No YouTube API is used anywhere.
 ## License
 
 MIT
+
+## Copyright & Accuracy Safeguards (2026-08-20)
+
+- Do NOT post copyrighted official broadcast without permission. Always check `yt-dlp --dump-json` fields: `uploader`, `license`, `upload_date`.
+- Official league channels (Serie A, UEFA, LaLiga, Premier League, FIFA TV) are high copyright risk — will show "not available" / takedown on Facebook. Avoid unless VERIFIED.
+- Prefer Highlightly sources with `verified: true` (Highlightly VERIFIED flag) or ScoreBat free-feed that explicitly allows redistribution. Filter: `highlight.verified === true` before posting.
+- For YouTube fallback: use fan highlights / public domain, check license, prefer Creative Commons. Skip videos where `uploader` is official broadcaster and `license` is not Creative Commons.
+- Accuracy: always verify `title`, `upload_date`, `duration` via `yt-dlp --dump-json` before building caption. Example 2026-08-20: Serie A video `7YyOTvPR950` title is `MILAN-INTER | HIGHLIGHTS | Tight Clash in Milan Derby | Serie A 2025/26` (uploaded 20260308, 155s) — not 2005. Corrected to `Serie A 2025/26 Derby — AC Milan vs Inter Milan`.
+- Enforcement: `src/highlightly.js` should filter VERIFIED only; `src/index.js` should skip non-verified official sources. See Zernio unpublish: `POST /v1/posts/{id}/unpublish {platform:"facebook"}` for takedowns (DELETE returns 400 for published).
