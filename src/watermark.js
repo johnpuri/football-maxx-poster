@@ -58,11 +58,11 @@ export function applyEnhancedWatermark(input, watermarkImg, logoImg, output, opt
     `[1:v]scale=140:140:flags=lanczos:force_original_aspect_ratio=increase,crop=140:140,format=rgba,colorchannelmixer=aa=0.6[wm]`,
     `[2:v]scale=-1:100:flags=lanczos[logo]`,
     baseFilter,
-    `[base][logo]overlay=10:10[withlogo]`,
+    `[base][logo]overlay=W-w-10:10[withlogo]`,
     `[withlogo]drawtext=fontfile=${fontFile}:text='${tournament}':x=(w-text_w)/2:y=12:fontsize=28:fontcolor=white[txt1]`,
     `[txt1]drawtext=fontfile=${fontFile}:text='${matchText}':x=(w-text_w)/2:y=42:fontsize=22:fontcolor=white[txt2]`,
     `[txt2]drawtext=fontfile=${fontFile}:text='${stage}':x=(w-text_w)/2:y=68:fontsize=18:fontcolor=white[txt3]`,
-    `[txt3][wm]overlay=W-w-5:5:format=auto`
+    `[txt3][wm]overlay=W-w-10:H-h-10:format=auto`
   ].join(";");
 
   const cmd = `ffmpeg -y -i "${input}" -i "${watermarkImg}" -i "${logoImg}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
