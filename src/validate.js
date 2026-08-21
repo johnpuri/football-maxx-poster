@@ -104,8 +104,8 @@ function containsBannedKeyword(text) {
   return false;
 }
 
-// Team aliases for matching caption vs video title
-const TEAM_ALIASES = {
+// Team aliases for matching caption vs video title — STRICT normalized matching
+export const TEAM_ALIASES = {
   "man utd": ["man utd", "manchester united", "man united"],
   "man city": ["man city", "manchester city"],
   "inter milan": ["inter milan", "inter", "internazionale"],
@@ -116,36 +116,47 @@ const TEAM_ALIASES = {
   "roma": ["roma", "as roma"],
   "barcelona": ["barcelona", "barca", "fc barcelona"],
   "atletico madrid": ["atletico madrid", "atletico", "atlético"],
+  "real madrid": ["real madrid", "real"],
+  "liverpool": ["liverpool"],
+  "arsenal": ["arsenal"],
+  "chelsea": ["chelsea"],
+  "dortmund": ["dortmund", "borussia dortmund", "bvb"],
+  "tottenham": ["tottenham", "spurs"],
+  "juventus": ["juventus", "juve"],
+  "leverkusen": ["leverkusen", "bayer leverkusen"],
+  "monaco": ["monaco", "as monaco"],
+  "lyon": ["lyon", "olympique lyonnais"],
+  "marseille": ["marseille", "olympique marseille"],
+  "west ham": ["west ham"],
+  "bayern": ["bayern", "bayern munich", "fc bayern"],
 };
 function normalizeTeam(t){ return t.toLowerCase().replace(/[^a-z0-9\s]/g,"").trim().replace(/\s+/g," "); }
+function normalizeTitle(t){ return t.toLowerCase().replace(/[^a-z0-9\s]/g," ").replace(/\s+/g," ").trim(); }
 function teamAppearsInTitle(team, titleLower){
   const n = normalizeTeam(team);
-  if (titleLower.includes(n)) return true;
-  // check aliases
+  const tn = normalizeTitle(titleLower);
+  if (tn.includes(n)) return true;
+  // check aliases — both directions
   for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)){
-    const isCanonical = aliases.some(a => n === a || n.includes(a));
+    const normalizedAliases = aliases.map(a=>normalizeTeam(a));
+    const isCanonical = normalizedAliases.some(a => n === a || n.includes(a) || a.includes(n));
     if (isCanonical){
-      for (const a of aliases){ if (titleLower.includes(a)) return true; }
+      for (const a of normalizedAliases){ if (tn.includes(a)) return true; }
     }
   }
-  // fuzzy: check first word
-  const first = n.split(" ")[0];
-  if (first.length >= 4 && titleLower.includes(first)) return true;
+  // STRICT: no fuzzy first-word fallback — both teams must explicitly appear
   return false;
 }
 export function validateTeamMatch(highlight, candidateTitle){
   const home = highlight.homeTeam || "";
   const away = highlight.awayTeam || "";
-  if (!home || !away) return { ok:true }; // no teams to check
-  const ct = (candidateTitle || highlight.title || "").toLowerCase();
+  if (!home || !away) return { ok:false, reason: `Missing home/away team metadata — strict validation requires both teams` };
+  const ct = (candidateTitle || highlight.ytTitle || highlight.candidateTitle || highlight.title || "");
   const homeOk = teamAppearsInTitle(home, ct);
   const awayOk = teamAppearsInTitle(away, ct);
   if (!homeOk || !awayOk){
-    return { ok:false, reason:`Team mismatch: caption ${home} vs ${away} not found in video title "${(candidateTitle||highlight.title||"").slice(0,80)}"` };
+    return { ok:false, reason:`Team mismatch: caption ${home} vs ${away} not both found in video title "${ct.slice(0,80)}"` };
   }
-  // league must match: if candidate title contains a different league keyword, flag
-  const expectedLeague = (highlight.league || highlight.tournament || "").toLowerCase();
-  // If expected is Europa League but title says "Barcelona vs Atletico" without Sevilla/Roma, already caught above
   return { ok:true };
 }
 export function validateLeagueMatch(highlight, candidateTitle){

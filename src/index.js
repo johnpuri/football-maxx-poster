@@ -12,6 +12,7 @@ import { getRandomHistoricalPick, finalToHighlight, pickRandomYear, TOURNAMENTS 
 import { isCartoonVideoSync, isCartoonVideo, pickFirstRealVideo } from "./cartoonFilter.js";
 import { isFifaHighRisk } from "./validate.js";
 import { validateHighlight, pickValidHighlightFromCandidates } from "./validate.js";
+import { parseHighlightFromTitle, validateTripleMatch } from "./ytParser.js";
 import fs from "fs";
 import { execSync } from "child_process";
 
