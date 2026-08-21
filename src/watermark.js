@@ -129,6 +129,8 @@ export function applyDynamicWatermark(input, opts = {}) {
   const fontFile = opts.fontFile || "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
   // Dynamic texts
+  // FIX double-title: if opts.skipTitleBar/skipDrawtext true (source already has title overlay), skip header pad+drawtext
+  const skipTitleBar = opts.skipTitleBar || opts.skipDrawtext || false;
   const tournamentText = escapeText(`${tournament} ${year}`);
   const matchText = escapeText(`${teamA} vs ${teamB}`);
   const stageText = escapeText(stage);
@@ -150,24 +152,41 @@ export function applyDynamicWatermark(input, opts = {}) {
   const overlayWmShifted = overlayWm.replace(/:5$/, `:${headerHeight + 5}`).replace(/:H-h-5$/, `:H-h-5`);
 
   let baseFilter;
-  if (targetHeight && targetHeight > 0) {
+  if (skipTitleBar) {
+    // No header bar — just optional scale, no pad/drawtext (prevents double title when source already has overlay)
+    if (targetHeight && targetHeight > 0) {
+      baseFilter = `[0:v]scale=-2:${targetHeight}:flags=lanczos[base]`;
+    } else {
+      baseFilter = `[0:v]copy[base]`;
+    }
+  } else if (targetHeight && targetHeight > 0) {
     baseFilter = `[0:v]scale=-2:${targetHeight}:flags=lanczos[scaled];[scaled]pad=iw:ih+${headerHeight}:0:${headerHeight}:color=black@0.6[base]`;
   } else {
     baseFilter = `[0:v]pad=iw:ih+${headerHeight}:0:${headerHeight}:color=black@0.6[base]`;
   }
 
-  const filter = [
+  const filterParts = [
     `[1:v]scale=${watermarkSize}:${watermarkSize}:flags=lanczos:force_original_aspect_ratio=increase,crop=${watermarkSize}:${watermarkSize},format=rgba,colorchannelmixer=aa=${watermarkAlpha}[wm]`,
-    `[2:v]scale=-1:${logoScaleH}:flags=lanczos[logo]`,
-    baseFilter,
-    `[base][logo]overlay=${logoOverlay}[withlogo]`,
-    `[withlogo]drawtext=fontfile=${fontFile}:text='${tournamentText}':x=(w-text_w)/2:y=12:fontsize=28:fontcolor=white[txt1]`,
-    `[txt1]drawtext=fontfile=${fontFile}:text='${matchText}':x=(w-text_w)/2:y=42:fontsize=22:fontcolor=white[txt2]`,
-    `[txt2]drawtext=fontfile=${fontFile}:text='${stageText}':x=(w-text_w)/2:y=68:fontsize=18:fontcolor=white[txt3]`,
-    `[txt3][wm]overlay=${overlayWmShifted}:format=auto`,
-  ].join(";");
+  ];
+  // Only add logo+drawtext when not skipping title bar (single source of title — fixes duplicate drawtext double-title)
+  if (!skipTitleBar) {
+    filterParts.push(`[2:v]scale=-1:${logoScaleH}:flags=lanczos[logo]`);
+    filterParts.push(baseFilter);
+    filterParts.push(`[base][logo]overlay=${logoOverlay}[withlogo]`);
+    filterParts.push(`[withlogo]drawtext=fontfile=${fontFile}:text='${tournamentText}':x=(w-text_w)/2:y=12:fontsize=28:fontcolor=white[txt1]`);
+    filterParts.push(`[txt1]drawtext=fontfile=${fontFile}:text='${matchText}':x=(w-text_w)/2:y=42:fontsize=22:fontcolor=white[txt2]`);
+    filterParts.push(`[txt2]drawtext=fontfile=${fontFile}:text='${stageText}':x=(w-text_w)/2:y=68:fontsize=18:fontcolor=white[txt3]`);
+    // Final overlay — logo inputs count: with title bar we have 3 inputs (video, watermark, logo)
+    filterParts.push(`[txt3][wm]overlay=${overlayWmShifted}:format=auto`);
+  } else {
+    filterParts.push(baseFilter);
+    filterParts.push(`[base][wm]overlay=${overlayWm}:format=auto`);
+  }
+  const filter = filterParts.join(";");
 
-  const cmd = `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
+  const cmd = skipTitleBar
+    ? `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`
+    : `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
 
   if (opts.dryRun) {
     console.log("[dryRun] " + cmd);
