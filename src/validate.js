@@ -155,11 +155,13 @@ export function validateLeagueMatch(highlight, candidateTitle){
   const leagues = ["premier league","la liga","laliga","bundesliga","serie a","ligue 1","champions league","europa league","fa cup","euro","world cup","copa america"];
   const expectedLeagueKey = leagues.find(l => expected.includes(l));
   if (!expectedLeagueKey) return { ok:true };
-  // If title mentions a different league, it's mismatch
+  // If title mentions a different league, it's mismatch — use word boundaries to avoid europa vs euro false positive
   for (const l of leagues){
-    if (ct.includes(l) && l !== expectedLeagueKey){
-      // allow generic "premier league" vs "epl" etc — but europa vs la liga is definitely mismatch
-      if (l==="laliga") continue; // handled as la liga
+    const re = new RegExp(`\\b${l.replace(/\s+/g, "\\s+")}\\b`, "i");
+    if (re.test(ct) && l !== expectedLeagueKey){
+      if (l==="laliga" && expectedLeagueKey==="la liga") continue;
+      if (expectedLeagueKey==="europa league" && l==="euro") continue;
+      if (l==="europa league" && expectedLeagueKey==="euro") continue;
       return { ok:false, reason:`League mismatch: expected ${expectedLeagueKey} but video title contains ${l} — "${candidateTitle.slice(0,80)}"` };
     }
   }
