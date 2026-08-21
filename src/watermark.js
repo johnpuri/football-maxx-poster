@@ -5,7 +5,7 @@
 import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
-import { tournamentLogoMap, getTournamentLogoPath } from "./config.js";
+import { tournamentLogoMap, getTournamentLogoPath, requireTournamentLogo } from "./config.js";
 import { isCartoonVideoSync } from "./cartoonFilter.js";
 
 export const WATERMARK_POS = "top-right"; // default
@@ -18,24 +18,18 @@ export const ENHANCED_WATERMARK_SIZE = 140;
 
 /**
  * Return logo path for a tournament/year combo.
- * e.g. getTournamentLogo("EURO", 2008) -> "/tmp/EURO_2008_logo.png"
- * Falls back to /tmp/generic_logo.png if not mapped.
+ * Always resolves via assets/logos; throws if logo missing (mandatory).
  */
 export function getTournamentLogo(tournament, year) {
-  if (getTournamentLogoPath) {
+  // Use centralized resolver which always points to assets/logos
+  try {
+    return requireTournamentLogo(tournament, year);
+  } catch (e) {
+    // Fallback: try getTournamentLogoPath then validate
     const mapped = getTournamentLogoPath(tournament, year);
-    if (mapped) return mapped;
+    if (mapped && fs.existsSync(mapped)) return mapped;
+    throw e;
   }
-  // fallback convention
-  const safeT = (tournament || "generic").toString().trim().replace(/\s+/g, "_");
-  const safeY = year ? `_${year}` : "";
-  const candidate = `/tmp/${safeT}${safeY}_logo.png`;
-  if (fs.existsSync(candidate)) return candidate;
-  // also try tournamentLogoMap direct lookup
-  const key = `${safeT.toUpperCase()}${safeY ? "_" + year : ""}`;
-  if (tournamentLogoMap[key] && fs.existsSync(tournamentLogoMap[key])) return tournamentLogoMap[key];
-  if (tournamentLogoMap[safeT.toUpperCase()] && fs.existsSync(tournamentLogoMap[safeT.toUpperCase()])) return tournamentLogoMap[safeT.toUpperCase()];
-  return "/tmp/generic_logo.png";
 }
 
 /**
@@ -111,6 +105,9 @@ export function applyDynamicWatermark(input, opts = {}) {
   const teamB = opts.teamB || "Spain";
   const stage = opts.stage || "Final";
   const logoPath = opts.logoPath || getTournamentLogo(tournament, year);
+  if (!fs.existsSync(logoPath)) {
+    throw new Error(`Missing required tournament logo at ${logoPath} for ${tournament} ${year} — aborting watermark (logos are mandatory).`);
+  }
   const watermarkPath = opts.watermarkPath || opts.watermarkImg || "/tmp/page_profile.jpg";
   const output = opts.output || "/tmp/out_dynamic.mp4";
 
@@ -141,14 +138,15 @@ export function applyDynamicWatermark(input, opts = {}) {
   }
   const overlayWm = `${wmX}:${wmY}`;
 
-  // Logo overlay position
+  // Logo overlay position — top bar above video (pad 110px)
   const logoOverlay = logoPos === "right" ? `W-w-10:10` : `10:10`;
+  const overlayWmShifted = overlayWm.replace(/:5$/, `:${headerHeight + 5}`).replace(/:H-h-5$/, `:H-h-5`);
 
   let baseFilter;
   if (targetHeight && targetHeight > 0) {
-    baseFilter = `[0:v]scale=-2:${targetHeight}:flags=lanczos[scaled];[scaled]drawbox=x=0:y=0:w=iw:h=${headerHeight}:color=black@0.6:t=fill[base]`;
+    baseFilter = `[0:v]scale=-2:${targetHeight}:flags=lanczos[scaled];[scaled]pad=iw:ih+${headerHeight}:0:${headerHeight}:color=black@0.6[base]`;
   } else {
-    baseFilter = `[0:v]drawbox=x=0:y=0:w=iw:h=${headerHeight}:color=black@0.6:t=fill[base]`;
+    baseFilter = `[0:v]pad=iw:ih+${headerHeight}:0:${headerHeight}:color=black@0.6[base]`;
   }
 
   const filter = [
@@ -159,7 +157,7 @@ export function applyDynamicWatermark(input, opts = {}) {
     `[withlogo]drawtext=fontfile=${fontFile}:text='${tournamentText}':x=(w-text_w)/2:y=12:fontsize=28:fontcolor=white[txt1]`,
     `[txt1]drawtext=fontfile=${fontFile}:text='${matchText}':x=(w-text_w)/2:y=42:fontsize=22:fontcolor=white[txt2]`,
     `[txt2]drawtext=fontfile=${fontFile}:text='${stageText}':x=(w-text_w)/2:y=68:fontsize=18:fontcolor=white[txt3]`,
-    `[txt3][wm]overlay=${overlayWm}:format=auto`,
+    `[txt3][wm]overlay=${overlayWmShifted}:format=auto`,
   ].join(";");
 
   const cmd = `ffmpeg -y -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
