@@ -304,30 +304,34 @@ export async function validateHighlight(highlight, opts = {}) {
     }
   }
 
-  // 6. Is logo available — requireTournamentLogo exists, fail if missing
+  // 6. Is logo available — requireTournamentLogo must succeed and logo must be valid PNG; if missing/invalid throw/skip
   const tournament = highlight.tournament || highlight.league || highlight.tournamentName || "";
   const year = highlight.year || (highlight.date ? new Date(highlight.date).getFullYear() : null);
+  function isValidPng(p){
+    try{
+      if(!fs.existsSync(p)) return false;
+      const buf=fs.readFileSync(p);
+      if(buf.length<500) return false;
+      return buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47;
+    }catch{ return false; }
+  }
   if (tournament) {
+    let logoPath;
     try {
-      const logoPath = requireTournamentLogo(tournament, year);
-      if (!fs.existsSync(logoPath)) {
-        return { valid: false, reason: `Missing required tournament logo for ${tournament} ${year || ""} at ${logoPath}`, details: { check: "logo" } };
-      }
+      logoPath = requireTournamentLogo(tournament, year);
     } catch (e) {
-      // If tournament is not mappable, try generic fallback — but requireTournamentLogo should handle GENERIC
-      // Check generic exists
-      const generic = getTournamentLogoPath("GENERIC");
-      if (!fs.existsSync(generic)) {
-        return { valid: false, reason: `Logo check failed for ${tournament}: ${e.message}`, details: { check: "logo", error: e.message } };
-      }
-      // If generic exists, allow posting with generic logo — not a failure
-      console.log(`[validate] Using generic logo for ${tournament}: ${e.message}`);
+      return { valid: false, reason: `Missing required tournament logo for ${tournament} ${year || ""}: ${e.message} — logos are mandatory, skipping candidate`, details: { check: "logo", error: e.message } };
+    }
+    if (!fs.existsSync(logoPath)) {
+      return { valid: false, reason: `Missing required tournament logo file for ${tournament} ${year || ""} at ${logoPath} — skip`, details: { check: "logo" } };
+    }
+    if (!isValidPng(logoPath)) {
+      return { valid: false, reason: `Invalid tournament logo (not PNG or too small) for ${tournament} at ${logoPath} — skip`, details: { check: "logoPng" } };
     }
   } else {
-    // No tournament specified — ensure generic logo exists
     const generic = getTournamentLogoPath("GENERIC");
-    if (!fs.existsSync(generic)) {
-      return { valid: false, reason: `Missing generic logo at ${generic} — logos are mandatory`, details: { check: "logoGeneric" } };
+    if (!fs.existsSync(generic) || !isValidPng(generic)) {
+      return { valid: false, reason: `Missing/invalid generic logo at ${generic} — logos are mandatory`, details: { check: "logoGeneric" } };
     }
   }
 

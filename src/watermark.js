@@ -72,7 +72,7 @@ export function applyWatermark(input, watermarkImg, output, opts = {}) {
   const xExpr = "W-w-10";
   const yExpr = "10";
   const filter = `[1:v]scale=${size}:${size}:flags=lanczos:force_original_aspect_ratio=increase,crop=${size}:${size},format=rgba[wm];[0:v][wm]overlay=${xExpr}:${yExpr}:format=yuv420`;
-  const cmd = `ffmpeg -y -i "${input}" -i "${watermarkImg}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset veryfast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
+  const cmd = `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkImg}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset veryfast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
   console.log(cmd);
   execSync(cmd, { stdio: "inherit" });
   return output;
@@ -107,6 +107,13 @@ export function applyDynamicWatermark(input, opts = {}) {
   const logoPath = opts.logoPath || getTournamentLogo(tournament, year);
   if (!fs.existsSync(logoPath)) {
     throw new Error(`Missing required tournament logo at ${logoPath} for ${tournament} ${year} — aborting watermark (logos are mandatory).`);
+  }
+  // Validate PNG: check header and size
+  {
+    const buf = fs.readFileSync(logoPath);
+    const isPng = buf.length > 8 && buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47;
+    if (!isPng) throw new Error(`Invalid tournament logo (not PNG) at ${logoPath} for ${tournament} ${year} — aborting.`);
+    if (buf.length < 500) throw new Error(`Tournament logo too small/invalid at ${logoPath} (${buf.length} bytes) — aborting.`);
   }
   const watermarkPath = opts.watermarkPath || opts.watermarkImg || "/tmp/page_profile.jpg";
   const output = opts.output || "/tmp/out_dynamic.mp4";
@@ -160,7 +167,7 @@ export function applyDynamicWatermark(input, opts = {}) {
     `[txt3][wm]overlay=${overlayWmShifted}:format=auto`,
   ].join(";");
 
-  const cmd = `ffmpeg -y -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
+  const cmd = `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
 
   if (opts.dryRun) {
     console.log("[dryRun] " + cmd);
@@ -243,7 +250,7 @@ export function downloadEuro2008(outPath = "/tmp/euro2008.mp4") {
 }
 
 export function reencodeForUpload(input, output, targetHeight = 540) {
-  const cmd = `ffmpeg -y -i "${input}" -vf "scale=-2:${targetHeight}:flags=lanczos" -c:v libx264 -crf 30 -preset veryfast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
+  const cmd = `/usr/bin/ffmpeg -y -i "${input}" -vf "scale=-2:${targetHeight}:flags=lanczos" -c:v libx264 -crf 30 -preset veryfast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
   execSync(cmd, { stdio: "inherit" });
   return output;
 }

@@ -307,6 +307,25 @@ async function main() {
       continue;
     }
 
+    // === Logo mandatory check before presign: requireTournamentLogo must succeed and PNG valid, else skip candidate ===
+    {
+      const { requireTournamentLogo } = await import("./config.js");
+      const tourn = h.tournament || h.league || "";
+      const yr = h.year || (h.date ? new Date(h.date).getFullYear() : null);
+      try {
+        const lp = requireTournamentLogo(tourn, yr);
+        if (!fs.existsSync(lp)) throw new Error(`logo file missing ${lp}`);
+        const buf = fs.readFileSync(lp);
+        if (!(buf[0]===0x89 && buf[1]===0x50 && buf[2]===0x4E && buf[3]===0x47 && buf.length>=500)) throw new Error(`invalid PNG logo ${lp}`);
+      } catch(e){
+        console.warn(`[logo] Skipping ${h.title} — logo check failed for ${tourn} ${yr}: ${e.message}`);
+        if (h.query) {
+          const picked = await pickValidHighlightFromCandidates(h.query, h, downloadVideoFile);
+          if (picked) { h = picked.highlight; localVideoPath = picked.videoPath; mediaUrls=[localVideoPath]; }
+          else continue;
+        } else continue;
+      }
+    }
     // === Validation before presign upload ===
     const vResult = await validateHighlight(h, { localVideoPath: localVideoPath || mediaUrls[0] });
     if (!vResult.valid) {
