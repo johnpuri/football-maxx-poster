@@ -6,7 +6,7 @@ import "dotenv/config";
 import { config } from "./config.js";
 import { fetchHighlights, filterAndRank } from "./highlightly.js";
 import { fetchScorebatHighlights, filterAndRankScorebat } from "./scorebat.js";
-import { createFacebookPost } from "./zernio.js";
+import { createFacebookPost, extractPostId, verifyPostPublished, isPostVerified, containsFacebookError } from "./zernio.js";
 import { formatPost } from "./formatter.js";
 import { getRandomHistoricalPick, finalToHighlight, pickRandomYear, TOURNAMENTS } from "./historical.js";
 import { isCartoonVideoSync, isCartoonVideo, pickFirstRealVideo } from "./cartoonFilter.js";
@@ -217,7 +217,8 @@ async function main() {
     return;
   }
   console.log(`Posting ${fresh.length} fresh highlights...`);
-  for (let h of toPost) {
+  for (let idx = 0; idx < toPost.length; idx++) {
+    let h = toPost[idx];
     const content = formatPost(h);
     // SAFETY: never allow youtube link in content (video reel only)
     if (/youtube\.com|youtu\.be/i.test(content)) {
@@ -349,8 +350,105 @@ async function main() {
     }
     console.log(`[validate] ✓ Highlight passed validation: ${h.title}`);
 
-    const result = await createFacebookPost({ content: formatPost(h), mediaUrls, publishNow: true });
-    console.log("Posted (reel):", JSON.stringify(result).slice(0, 300));
+    // --- Post with verification + retry (max 3 retries using next candidates) ---
+    let postVerified = false;
+    let postResult = null;
+    let postId = null;
+    let verifyRetries = 2; // poll GET /posts/{id} up to 3 times
+    const MAX_POST_RETRIES = 3;
+    let retryCount = 0;
+    // current highlight pointer stays as h; on failure consume next candidate from toPost array
+    let currentIdx = idx;
+    // we need mutable reference to highlight for retries
+    let candidate = h;
+    let candidateMediaUrls = mediaUrls;
+    let candidateLocalPath = localVideoPath;
+
+    while (retryCount <= MAX_POST_RETRIES) {
+      try {
+        const contentToPost = formatPost(candidate);
+        if (/youtube\.com|youtu\.be/i.test(contentToPost)) {
+          console.warn(`[SAFETY] Skipping post with YouTube link in content: ${candidate.title}`);
+          throw new Error("YouTube link in content");
+        }
+        postResult = await createFacebookPost({ content: contentToPost, mediaUrls: candidateMediaUrls, publishNow: true });
+        const payloadStr = JSON.stringify(postResult);
+        if (containsFacebookError(payloadStr) && /moved|rejected|blocked/i.test(payloadStr)) {
+          throw new Error(`Facebook error in createPost response: ${payloadStr.slice(0,500)}`);
+        }
+        postId = extractPostId(postResult);
+        console.log(`Posted (reel): ${JSON.stringify(postResult).slice(0,300)} postId=${postId}`);
+        if (!postId) {
+          console.warn(`[verify] No postId extracted from result, treating as failure`);
+          throw new Error("No postId in create response");
+        }
+        // Verify via GET /posts/{id} — status published, platforms[0].status published, mediaItems video, platformPostUrl exists
+        const ver = await verifyPostPublished(postId, { retries: verifyRetries, delayMs: 3000 });
+        if (ver.verified) {
+          console.log(`[verify] ✓ Post verified: ${postId} — ${ver.reason}`);
+          postVerified = true;
+          // update h to successful candidate for posted.json
+          h = candidate;
+          mediaUrls = candidateMediaUrls;
+          localVideoPath = candidateLocalPath;
+          break;
+        } else {
+          console.warn(`[verify] ✗ Post NOT verified (${postId}): ${ver.reason}`);
+          throw new Error(`Verification failed: ${ver.reason}`);
+        }
+      } catch (e) {
+        const isFbError = /moved|rejected|blocked/i.test(e.message || "");
+        console.warn(`[post] Attempt ${retryCount + 1}/${MAX_POST_RETRIES + 1} failed${isFbError ? " (Facebook moved/rejected/blocked)" : ""}: ${e.message?.slice(0,400)}`);
+        if (retryCount >= MAX_POST_RETRIES) {
+          console.error(`[post] All ${MAX_POST_RETRIES + 1} attempts exhausted for ${candidate.title} — skipping`);
+          break;
+        }
+        // Try next candidate from toPost
+        const nextIdx = currentIdx + 1;
+        if (nextIdx >= toPost.length) {
+          console.warn(`[post] No more candidates to retry (nextIdx ${nextIdx} >= ${toPost.length})`);
+          break;
+        }
+        const next = toPost[nextIdx];
+        console.log(`[post] Retrying with next candidate: ${next.title} (retry ${retryCount + 1}/${MAX_POST_RETRIES})`);
+        // Prepare next candidate media (reuse same download logic if needed)
+        let nextMedia = next.mediaUrls || next.mediaFiles || [];
+        let nextLocal = next.localVideoPath || null;
+        const nextLink = next.videoUrl || next.embedUrl || "";
+        if (!nextMedia.length && !nextLocal && nextLink) {
+          const dl = await downloadVideoFile(nextLink, next.id);
+          if (dl) { nextLocal = dl; nextMedia = [dl]; }
+        }
+        if (!nextMedia.length && nextLocal) nextMedia = [nextLocal];
+        if (!nextMedia.length) {
+          console.warn(`[post] Next candidate has no video file, skipping: ${next.title}`);
+          currentIdx = nextIdx;
+          idx = nextIdx;
+          retryCount++;
+          continue;
+        }
+        // Validate next candidate quickly
+        const v2 = await validateHighlight(next, { localVideoPath: nextLocal || nextMedia[0] });
+        if (!v2.valid) {
+          console.warn(`[post] Next candidate invalid: ${v2.reason} — skipping`);
+          currentIdx = nextIdx;
+          idx = nextIdx;
+          retryCount++;
+          continue;
+        }
+        candidate = next;
+        candidateMediaUrls = nextMedia;
+        candidateLocalPath = nextLocal;
+        currentIdx = nextIdx;
+        idx = nextIdx; // advance outer loop so we don't reprocess consumed candidate
+        retryCount++;
+        // continue loop to post next candidate
+      }
+    }
+    if (!postVerified) {
+      console.error(`[post] Failed to publish verified reel after retries — not marking as posted, moving to next`);
+      continue;
+    }
     posted.add(h.id);
     savePosted(posted);
   }
