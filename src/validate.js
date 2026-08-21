@@ -104,6 +104,68 @@ function containsBannedKeyword(text) {
   return false;
 }
 
+// Team aliases for matching caption vs video title
+const TEAM_ALIASES = {
+  "man utd": ["man utd", "manchester united", "man united"],
+  "man city": ["man city", "manchester city"],
+  "inter milan": ["inter milan", "inter", "internazionale"],
+  "ac milan": ["ac milan", "milan"],
+  "bayern munich": ["bayern munich", "bayern", "fc bayern"],
+  "psg": ["psg", "paris saint-germain", "paris sg"],
+  "sevilla": ["sevilla"],
+  "roma": ["roma", "as roma"],
+  "barcelona": ["barcelona", "barca", "fc barcelona"],
+  "atletico madrid": ["atletico madrid", "atletico", "atlético"],
+};
+function normalizeTeam(t){ return t.toLowerCase().replace(/[^a-z0-9\s]/g,"").trim().replace(/\s+/g," "); }
+function teamAppearsInTitle(team, titleLower){
+  const n = normalizeTeam(team);
+  if (titleLower.includes(n)) return true;
+  // check aliases
+  for (const [canonical, aliases] of Object.entries(TEAM_ALIASES)){
+    const isCanonical = aliases.some(a => n === a || n.includes(a));
+    if (isCanonical){
+      for (const a of aliases){ if (titleLower.includes(a)) return true; }
+    }
+  }
+  // fuzzy: check first word
+  const first = n.split(" ")[0];
+  if (first.length >= 4 && titleLower.includes(first)) return true;
+  return false;
+}
+export function validateTeamMatch(highlight, candidateTitle){
+  const home = highlight.homeTeam || "";
+  const away = highlight.awayTeam || "";
+  if (!home || !away) return { ok:true }; // no teams to check
+  const ct = (candidateTitle || highlight.title || "").toLowerCase();
+  const homeOk = teamAppearsInTitle(home, ct);
+  const awayOk = teamAppearsInTitle(away, ct);
+  if (!homeOk || !awayOk){
+    return { ok:false, reason:`Team mismatch: caption ${home} vs ${away} not found in video title "${(candidateTitle||highlight.title||"").slice(0,80)}"` };
+  }
+  // league must match: if candidate title contains a different league keyword, flag
+  const expectedLeague = (highlight.league || highlight.tournament || "").toLowerCase();
+  // If expected is Europa League but title says "Barcelona vs Atletico" without Sevilla/Roma, already caught above
+  return { ok:true };
+}
+export function validateLeagueMatch(highlight, candidateTitle){
+  const expected = (highlight.league || highlight.tournament || "").toLowerCase();
+  const ct = (candidateTitle||"").toLowerCase();
+  // If candidate title explicitly mentions a different major league, reject
+  const leagues = ["premier league","la liga","laliga","bundesliga","serie a","ligue 1","champions league","europa league","fa cup","euro","world cup","copa america"];
+  const expectedLeagueKey = leagues.find(l => expected.includes(l));
+  if (!expectedLeagueKey) return { ok:true };
+  // If title mentions a different league, it's mismatch
+  for (const l of leagues){
+    if (ct.includes(l) && l !== expectedLeagueKey){
+      // allow generic "premier league" vs "epl" etc — but europa vs la liga is definitely mismatch
+      if (l==="laliga") continue; // handled as la liga
+      return { ok:false, reason:`League mismatch: expected ${expectedLeagueKey} but video title contains ${l} — "${candidateTitle.slice(0,80)}"` };
+    }
+  }
+  return { ok:true };
+}
+
 function getVideoDurationSeconds(filePath) {
   try {
     const out = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}" 2>&1`, { encoding: "utf8", timeout: 10000 }).trim();
@@ -180,6 +242,14 @@ export async function validateHighlight(highlight, opts = {}) {
   const content = formatPost(highlight);
   if (/youtube\.com|youtu\.be/i.test(content)) {
     return { valid: false, reason: `Post content contains YouTube link — must be video reel only, not link share`, details: { check: "youtubeLink" } };
+  }
+  // 4b. Content must match video: teams in caption must equal teams from yt title
+  const candidateTitleForMatch = opts.candidateTitle || highlight.candidateTitle || highlight.ytTitle || title;
+  if (highlight.homeTeam && highlight.awayTeam) {
+    const tm = validateTeamMatch(highlight, candidateTitleForMatch);
+    if (!tm.ok) return { valid: false, reason: tm.reason, details: { check: "teamMatch" } };
+    const lm = validateLeagueMatch(highlight, candidateTitleForMatch);
+    if (!lm.ok) return { valid: false, reason: lm.reason, details: { check: "leagueMatch" } };
   }
   // Also ensure highlight itself won't be posted as link — require video file path
   const videoFile = opts.localVideoPath || highlight.localVideoPath || (highlight.mediaUrls && highlight.mediaUrls[0]) || null;
@@ -324,7 +394,7 @@ export async function pickValidHighlightFromCandidates(query, baseHighlight, dow
     if (downloadFn) {
       try { videoPath = await downloadFn(videoUrl, `${baseHighlight.id || "candidate"}_${c.id}`); } catch {}
     }
-    const result = await validateHighlight(candidateHighlight, { localVideoPath: videoPath, requireVideoFile: true });
+    const result = await validateHighlight({ ...candidateHighlight, candidateTitle: c.title, ytTitle: c.title }, { localVideoPath: videoPath, requireVideoFile: true, candidateTitle: c.title });
     if (result.valid) {
       console.log(`[validate] ✓ Candidate ${idx + 1} valid: ${c.title}`);
       return { highlight: candidateHighlight, videoPath, validResult: result };
