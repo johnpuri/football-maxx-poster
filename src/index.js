@@ -10,6 +10,7 @@ import { createFacebookPost } from "./zernio.js";
 import { formatPost } from "./formatter.js";
 import { getRandomHistoricalPick, finalToHighlight, pickRandomYear, TOURNAMENTS } from "./historical.js";
 import { isCartoonVideoSync, isCartoonVideo, pickFirstRealVideo } from "./cartoonFilter.js";
+import { validateHighlight, pickValidHighlightFromCandidates } from "./validate.js";
 import fs from "fs";
 import { execSync } from "child_process";
 
@@ -207,7 +208,7 @@ async function main() {
     return;
   }
   console.log(`Posting ${fresh.length} fresh highlights...`);
-  for (const h of toPost) {
+  for (let h of toPost) {
     const content = formatPost(h);
     // SAFETY: never allow youtube link in content (video reel only)
     if (/youtube\.com|youtu\.be/i.test(content)) {
@@ -217,33 +218,111 @@ async function main() {
     console.log("\n---");
     console.log(content);
     console.log("---");
+
+    // Dry-run: validate metadata without requiring video file download
     if (config.dryRun) {
+      // For yt-dlp sourced highlights with multiple candidates, iterate 1-5 until valid (metadata only)
+      if (h.source === "historical-yt-dlp" && h.query) {
+        // In dry-run, validate without downloading — skip video file check
+        const dryResult = await validateHighlight(h, { skipVideoCheck: true });
+        if (!dryResult.valid) {
+          console.log(`[DRY RUN][validate] Initial candidate failed: ${dryResult.reason} — trying next ytsearch candidates 1-5...`);
+          // Try to find next valid candidate via ytsearch iteration (metadata-only, no download)
+          const { execSync: _exec } = await import("child_process");
+          try {
+            const out = _exec(`yt-dlp "ytsearch5:${h.query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+            const lines = out.split("\n").filter(Boolean);
+            const cands = [];
+            for (let i = 0; i < lines.length - 1; i += 2) {
+              const title = lines[i]; const id = lines[i+1];
+              if (/^[A-Za-z0-9_-]{6,}$/.test(id)) cands.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
+            }
+            let found = false;
+            for (const c of cands) {
+              const candH = { ...h, title: c.title, videoUrl: `https://www.youtube.com/watch?v=${c.id}`, embedUrl: `https://www.youtube.com/watch?v=${c.id}`, thumbnail: c.thumbnail };
+              const r = await validateHighlight(candH, { skipVideoCheck: true });
+              if (r.valid) {
+                console.log(`[DRY RUN][validate] ✓ Found valid candidate: ${c.title} (${c.id})`);
+                h = candH; found = true; break;
+              } else {
+                console.log(`[DRY RUN][validate] ✗ Candidate ${c.id} failed: ${r.reason}`);
+              }
+            }
+            if (!found) { console.warn(`[DRY RUN][validate] No valid candidate found for query "${h.query}" — skipping`); continue; }
+          } catch (e) { console.warn(`[DRY RUN] ytsearch iteration failed: ${e.message}`); continue; }
+        } else {
+          console.log(`[DRY RUN][validate] ✓ Highlight valid: ${dryResult.reason}`);
+        }
+      } else {
+        const dryResult = await validateHighlight(h, { skipVideoCheck: true });
+        if (!dryResult.valid) { console.warn(`[DRY RUN][validate] Skipping invalid highlight: ${dryResult.reason}`); continue; }
+        console.log(`[DRY RUN][validate] ✓ Highlight valid: ${dryResult.reason}`);
+      }
       console.log(`[DRY RUN] Would post (video reel only): ${h.title}`);
-      // In dry-run, still show would-be media handling without actual download
       if (h.videoUrl || h.embedUrl) console.log(`[DRY RUN] videoUrl present but NOT added to content — would download video file for reel: ${h.videoUrl || h.embedUrl}`);
-    } else {
-      if (!config.zernioApiKey || !config.facebookAccountId) {
-        console.warn("Skipping post - ZERNIO_API_KEY or FACEBOOK_ACCOUNT_ID missing. Set them in .env (see README).");
-        console.log("[DRY RUN fallback] Not posted.");
-        continue;
-      }
-      // VIDEO REEL ONLY: require local video file, never post YouTube link
-      let mediaUrls = h.mediaUrls || h.mediaFiles || [];
-      // If highlight has videoUrl, attempt to download video file for reel
-      const videoLink = h.videoUrl || h.embedUrl || "";
-      if (!mediaUrls.length && videoLink) {
-        const downloaded = await downloadVideoFile(videoLink, h.id);
-        if (downloaded) mediaUrls = [downloaded];
-      }
-      // Also try direct media field if present
-      if (!mediaUrls.length && h.localVideoPath) mediaUrls = [h.localVideoPath];
-      if (!mediaUrls.length) {
-        console.warn(`[VIDEO REEL ONLY] Skipping ${h.title} — no video file available (YouTube links are not posted). Need local video file.`);
-        continue;
-      }
-      const result = await createFacebookPost({ content, mediaUrls, publishNow: true });
-      console.log("Posted (reel):", JSON.stringify(result).slice(0, 300));
+      posted.add(h.id);
+      savePosted(posted);
+      continue;
     }
+
+    if (!config.zernioApiKey || !config.facebookAccountId) {
+      console.warn("Skipping post - ZERNIO_API_KEY or FACEBOOK_ACCOUNT_ID missing. Set them in .env (see README).");
+      console.log("[DRY RUN fallback] Not posted.");
+      continue;
+    }
+
+    // VIDEO REEL ONLY: require local video file, never post YouTube link
+    let mediaUrls = h.mediaUrls || h.mediaFiles || [];
+    let localVideoPath = h.localVideoPath || null;
+    const videoLink = h.videoUrl || h.embedUrl || "";
+
+    // For historical yt-dlp highlights: iterate ytsearch 1-5 until valid before presign upload
+    if (!mediaUrls.length && !localVideoPath && videoLink && h.source === "historical-yt-dlp" && h.query) {
+      console.log(`[validate] Historical highlight — iterating ytsearch candidates 1-5 for valid video before presign upload...`);
+      const picked = await pickValidHighlightFromCandidates(h.query, h, downloadVideoFile);
+      if (picked) {
+        h = picked.highlight;
+        localVideoPath = picked.videoPath;
+        mediaUrls = [localVideoPath];
+        console.log(`[validate] Using validated candidate: ${h.title} → ${localVideoPath}`);
+      } else {
+        console.warn(`[validate] No valid candidate found for "${h.query}" — skipping highlight`);
+        continue;
+      }
+    } else if (!mediaUrls.length && videoLink) {
+      const downloaded = await downloadVideoFile(videoLink, h.id);
+      if (downloaded) { localVideoPath = downloaded; mediaUrls = [downloaded]; }
+    }
+    if (!mediaUrls.length && localVideoPath) mediaUrls = [localVideoPath];
+    if (!mediaUrls.length) {
+      console.warn(`[VIDEO REEL ONLY] Skipping ${h.title} — no video file available (YouTube links are not posted). Need local video file.`);
+      continue;
+    }
+
+    // === Validation before presign upload ===
+    const vResult = await validateHighlight(h, { localVideoPath: localVideoPath || mediaUrls[0] });
+    if (!vResult.valid) {
+      console.warn(`[validate] Skipping invalid highlight before presign upload: ${vResult.reason}`);
+      // If ytsearch candidates available and not already iterated, try next candidates
+      if (h.query) {
+        console.log(`[validate] Trying next candidates for "${h.query}"...`);
+        const picked = await pickValidHighlightFromCandidates(h.query, h, downloadVideoFile);
+        if (picked) {
+          h = picked.highlight;
+          localVideoPath = picked.videoPath;
+          mediaUrls = [localVideoPath];
+          const retry = await validateHighlight(h, { localVideoPath });
+          if (!retry.valid) { console.warn(`[validate] Retry also failed: ${retry.reason} — skipping`); continue; }
+          console.log(`[validate] Retry valid: ${h.title}`);
+        } else { console.warn(`[validate] No valid candidate after retry — skipping`); continue; }
+      } else {
+        continue;
+      }
+    }
+    console.log(`[validate] ✓ Highlight passed validation: ${h.title}`);
+
+    const result = await createFacebookPost({ content: formatPost(h), mediaUrls, publishNow: true });
+    console.log("Posted (reel):", JSON.stringify(result).slice(0, 300));
     posted.add(h.id);
     savePosted(posted);
   }
