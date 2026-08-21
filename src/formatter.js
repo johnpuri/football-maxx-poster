@@ -1,9 +1,9 @@
 /**
- * Format highlight into Facebook post copy
+ * Format highlight into Facebook post copy — VIDEO REEL ONLY
+ * Never include YouTube links (videoUrl/embedUrl). Post must be video file upload.
  */
 export function formatPost(highlight) {
-  const { title, league, homeTeam, awayTeam, date, videoUrl, embedUrl } = highlight;
-  const link = videoUrl || embedUrl || "";
+  const { title, league, date } = highlight;
   const leagueLine = league ? `🏆 ${league}` : "⚽ Football Highlight";
   const dateStr = date ? formatDate(date) : "";
   const lines = [
@@ -11,9 +11,6 @@ export function formatPost(highlight) {
     "",
     leagueLine,
     dateStr ? `📅 ${dateStr}` : "",
-    "",
-    "🎥 Watch highlights:",
-    link,
     "",
     "#Football #Highlights #FootballMaxx",
   ].filter(Boolean);

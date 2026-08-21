@@ -1,4 +1,10 @@
 import "dotenv/config";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOGOS_DIR = path.resolve(__dirname, "../assets/logos");
 
 // Supported leagues - Highlightly covers 950+ leagues
 // These are the ones Football Maxx prioritizes
@@ -15,13 +21,19 @@ export const PRIORITY_LEAGUES = [
 ];
 
 export const tournamentLogoMap = {
-  "EURO_2008": "/tmp/euro2008_logo.png",
-  "EURO": "/tmp/euro2008_logo.png",
-  "WORLD_CUP_2006": "/tmp/worldcup2006_logo.png",
-  "WORLD_CUP": "/tmp/worldcup_logo.png",
-  "CHAMPIONS_LEAGUE": "/tmp/ucl_logo.png",
-  "COPA_AMERICA": "/tmp/copa_logo.png",
-  "GENERIC": "/tmp/generic_logo.png",
+  "WORLD_CUP": path.join(LOGOS_DIR, "fifa_world_cup.png"),
+  "WORLD_CUP_QUALIFIER": path.join(LOGOS_DIR, "fifa_world_cup.png"),
+  "EURO": path.join(LOGOS_DIR, "uefa_euro.png"),
+  "CHAMPIONS_LEAGUE": path.join(LOGOS_DIR, "champions_league.png"),
+  "PREMIER_LEAGUE": path.join(LOGOS_DIR, "premier_league.png"),
+  "LA_LIGA": path.join(LOGOS_DIR, "laliga.png"),
+  "SERIE_A": path.join(LOGOS_DIR, "serie_a.png"),
+  "BUNDESLIGA": path.join(LOGOS_DIR, "bundesliga.png"),
+  "LIGUE_1": path.join(LOGOS_DIR, "ligue1.png"),
+  "COPA_AMERICA": path.join(LOGOS_DIR, "copa_america.png"),
+  "FA_CUP": path.join(LOGOS_DIR, "fa_cup.png"),
+  "EUROPA_LEAGUE": path.join(LOGOS_DIR, "europa_league.png"),
+  "GENERIC": path.join(LOGOS_DIR, "generic.png"),
 };
 
 export function getTournamentLogoPath(tournament, year) {
@@ -30,9 +42,13 @@ export function getTournamentLogoPath(tournament, year) {
   const keyWithYear = year ? `${t}_${year}` : t;
   if (tournamentLogoMap[keyWithYear]) return tournamentLogoMap[keyWithYear];
   if (tournamentLogoMap[t]) return tournamentLogoMap[t];
-  // fallback convention path
-  const candidate = `/tmp/${t}${year ? "_" + year : ""}_logo.png`;
-  return candidate;
+  return tournamentLogoMap.GENERIC;
+}
+
+export function requireTournamentLogo(tournament, year) {
+  const p = getTournamentLogoPath(tournament, year);
+  if (!fs.existsSync(p)) throw new Error(`Missing required tournament logo at ${p} for ${tournament} ${year} — logos are mandatory (assets/logos/)`);
+  return p;
 }
 
 export const config = {
@@ -65,7 +81,7 @@ export function priorityScore(leagueName) {
   if (!leagueName) return 0;
   const lower = leagueName.toLowerCase();
   for (let i = 0; i < PRIORITY_LEAGUES.length; i++) {
-    if (PRIORITY_LEAGUES[i].keys.some((k) => lower.includes(k))) return 100 - i; // earlier = higher
+    if (PRIORITY_LEAGUES[i].keys.some((k) => lower.includes(k))) return 100 - i;
   }
   return 0;
 }

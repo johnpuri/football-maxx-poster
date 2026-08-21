@@ -138,6 +138,23 @@ function tryYtDlpSearchFilteredSync(query) {
   return "";
 }
 
+async function downloadVideoFile(videoUrl, id) {
+  if (!videoUrl || !/^https?:\/\//.test(videoUrl)) return null;
+  const outPath = `/tmp/footballmaxx_${String(id).replace(/[^a-zA-Z0-9_-]/g, "_")}.mp4`;
+  try {
+    console.log(`[video] Downloading for reel: ${videoUrl} → ${outPath}`);
+    execSync(`yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b" --merge-output-format mp4 --no-playlist --max-filesize 500M -o "${outPath}" "${videoUrl}" 2>&1 | tail -n 5`, { timeout: 120000, encoding: "utf8" });
+    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10000) {
+      console.log(`[video] Downloaded: ${outPath} (${Math.round(fs.statSync(outPath).size/1024/1024)}MB)`);
+      return outPath;
+    }
+    console.warn(`[video] Download failed or too small: ${outPath}`);
+  } catch (e) {
+    console.warn(`[video] Download error: ${e.message?.slice(0,300)}`);
+  }
+  return null;
+}
+
 // Async version that also does Kimi WebBridge vision check on thumbnail (real match footage only)
 export async function tryYtDlpSearchFiltered(query) {
   try {
@@ -192,19 +209,40 @@ async function main() {
   console.log(`Posting ${fresh.length} fresh highlights...`);
   for (const h of toPost) {
     const content = formatPost(h);
+    // SAFETY: never allow youtube link in content (video reel only)
+    if (/youtube\.com|youtu\.be/i.test(content)) {
+      console.warn(`[SAFETY] Skipping post with YouTube link in content: ${h.title}`);
+      continue;
+    }
     console.log("\n---");
     console.log(content);
     console.log("---");
     if (config.dryRun) {
-      console.log(`[DRY RUN] Would post: ${h.title}`);
+      console.log(`[DRY RUN] Would post (video reel only): ${h.title}`);
+      // In dry-run, still show would-be media handling without actual download
+      if (h.videoUrl || h.embedUrl) console.log(`[DRY RUN] videoUrl present but NOT added to content — would download video file for reel: ${h.videoUrl || h.embedUrl}`);
     } else {
       if (!config.zernioApiKey || !config.facebookAccountId) {
         console.warn("Skipping post - ZERNIO_API_KEY or FACEBOOK_ACCOUNT_ID missing. Set them in .env (see README).");
         console.log("[DRY RUN fallback] Not posted.");
         continue;
       }
-      const result = await createFacebookPost({ content, publishNow: true });
-      console.log("Posted:", JSON.stringify(result).slice(0, 300));
+      // VIDEO REEL ONLY: require local video file, never post YouTube link
+      let mediaUrls = h.mediaUrls || h.mediaFiles || [];
+      // If highlight has videoUrl, attempt to download video file for reel
+      const videoLink = h.videoUrl || h.embedUrl || "";
+      if (!mediaUrls.length && videoLink) {
+        const downloaded = await downloadVideoFile(videoLink, h.id);
+        if (downloaded) mediaUrls = [downloaded];
+      }
+      // Also try direct media field if present
+      if (!mediaUrls.length && h.localVideoPath) mediaUrls = [h.localVideoPath];
+      if (!mediaUrls.length) {
+        console.warn(`[VIDEO REEL ONLY] Skipping ${h.title} — no video file available (YouTube links are not posted). Need local video file.`);
+        continue;
+      }
+      const result = await createFacebookPost({ content, mediaUrls, publishNow: true });
+      console.log("Posted (reel):", JSON.stringify(result).slice(0, 300));
     }
     posted.add(h.id);
     savePosted(posted);
