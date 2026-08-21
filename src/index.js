@@ -10,6 +10,7 @@ import { createFacebookPost } from "./zernio.js";
 import { formatPost } from "./formatter.js";
 import { getRandomHistoricalPick, finalToHighlight, pickRandomYear, TOURNAMENTS } from "./historical.js";
 import { isCartoonVideoSync, isCartoonVideo, pickFirstRealVideo } from "./cartoonFilter.js";
+import { isFifaHighRisk } from "./validate.js";
 import { validateHighlight, pickValidHighlightFromCandidates } from "./validate.js";
 import fs from "fs";
 import { execSync } from "child_process";
@@ -28,6 +29,13 @@ async function getHighlights() {
   let historicPick = null;
   if (historicalMode) {
     historicPick = getRandomHistoricalPick();
+    // FIFA safeguard: if somehow a WC Final slipped through, re-roll (up to 5 tries)
+    let rerolls=0;
+    while (historicPick && /world cup/i.test(historicPick.tournament) && /final/i.test(historicPick.title) && rerolls<5){
+      console.log(`[FIFA SAFEGUARD] Re-rolling banned WC Final pick: ${historicPick.title} → picking club game instead`);
+      historicPick = getRandomHistoricalPick();
+      rerolls++;
+    }
     console.log(`[HISTORICAL MODE] Random pick: ${historicPick.tournament} ${historicPick.year} — ${historicPick.title} (query: "${historicPick.query}")`);
   }
 

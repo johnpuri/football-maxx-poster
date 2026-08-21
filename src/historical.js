@@ -1,6 +1,18 @@
 /**
  * Historical random picker for Football Maxx — 1998 to today.
  * Diverse club + country games across eras, not just FIFA WC finals.
+ *
+ * COPYRIGHT SAFE CONTENT POLICY (2026-08-20):
+ * - SAFE (80% weight): club leagues where copyright enforcement is lower:
+ *   Premier League, La Liga, Serie A, Bundesliga, Ligue 1, Champions League fan edits,
+ *   Europa League, FA Cup. These are preferred for daily posts.
+ * - COUNTRY (20% weight): Euro, Copa America, World Cup NON-FINAL games only.
+ *   World Cup Finals from FIFA.tv are BANNED entirely (FIFA Content ID blocks 15s+).
+ *   Watermark covering FIFA.tv + pad bar HIGH UP is applied for transformative use,
+ *   but WC Finals are still rejected — use club game instead.
+ * - BANNED: any "World Cup {year} Final" title pattern. Filtered at picker + validator.
+ * - Transformative safeguard: watermark overlay + extended canvas bar ABOVE video,
+ *   but not relied on for WC Finals.
  */
 export const TOURNAMENTS = ["World Cup","Euro","Champions League","Premier League","La Liga","Serie A","Bundesliga","Ligue 1","Copa America","FA Cup","Europa League"];
 export const NOTABLE_FINALS = [
@@ -81,13 +93,26 @@ export function pickRandomYear(min=1998,max=new Date().getFullYear()){ return Ma
 export function pickRandomFinal(){ return NOTABLE_FINALS[Math.floor(Math.random()*NOTABLE_FINALS.length)]; }
 export function pickRandomClubGame(){ return CLUB_GAMES[Math.floor(Math.random()*CLUB_GAMES.length)]; }
 export function pickRandomCountryGame(){ return COUNTRY_GAMES[Math.floor(Math.random()*COUNTRY_GAMES.length)]; }
-export function pickRandomClubOrCountry(){ const ratio=parseFloat(process.env.CLUB_COUNTRY_RATIO||"0.5"); const isClub=Math.random()<ratio; const game=isClub?pickRandomClubGame():pickRandomCountryGame(); return {...game, category:isClub?"club":"country"}; }
+// SAFE CONTENT LISTS — exported for validator awareness
+export const SAFE_CLUB_TOURNAMENTS = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1","Champions League","Europa League","FA Cup"];
+export const SAFE_COUNTRY_TOURNAMENTS = ["Euro","Copa America","World Cup Qualifier"];
+// WC Finals are banned; filtered finals exclude World Cup
+const SAFE_FINALS = NOTABLE_FINALS.filter(f => f.tournament !== "World Cup");
+
+export function pickRandomClubOrCountry(){ const ratio=parseFloat(process.env.CLUB_COUNTRY_RATIO||"0.8"); const isClub=Math.random()<ratio; const game=isClub?pickRandomClubGame():pickRandomCountryGame(); return {...game, category:isClub?"club":"country"}; }
 export function getRandomHistoricalPick(){
   const r=Math.random();
-  if(r<0.30){ const f=pickRandomFinal(); return {tournament:f.tournament,year:f.year,match:f,title:f.title,query:`${f.tournament} ${f.year} final ${f.homeTeam} vs ${f.awayTeam} highlights`,category:"final"}; }
-  if(r<0.65){ const g=pickRandomClubGame(); return {tournament:g.tournament,year:g.year,match:g,title:g.title,query:`${g.tournament} ${g.year} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"club"}; }
-  const g=pickRandomCountryGame(); return {tournament:g.tournament,year:g.year,match:g,title:g.title,query:`${g.tournament} ${g.year} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country"};
-}
+  if(r < 0.80){
+    if(r < 0.20 && SAFE_FINALS.length){
+      const f=SAFE_FINALS[Math.floor(Math.random()*SAFE_FINALS.length)];
+      return {tournament:f.tournament,year:f.year,match:f,title:f.title,query:`${f.tournament} ${f.year} final ${f.homeTeam} vs ${f.awayTeam} highlights`,category:"final", safe:true};
+    }
+    const g=pickRandomClubGame(); return {tournament:g.tournament,year:g.year,match:g,title:g.title,query:`${g.tournament} ${g.year} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"club", safe:true};
+  }
+  let g=pickRandomCountryGame();
+  let attempts=0;
+  while(g.tournament==="World Cup" && /final/i.test(g.title) && attempts<10){ g=pickRandomCountryGame(); attempts++; }
+  return {tournament:g.tournament,year:g.year,match:g,title:g.title,query:`${g.tournament} ${g.year} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", safe: g.tournament!=="World Cup" || !/final/i.test(g.title)};}
 export function getDiverseBatch(n=6){
   const seen=new Set(); const out=[]; let attempts=0;
   while(out.length<n && attempts<100){ attempts++; const p=getRandomHistoricalPick(); const key=`${p.tournament}-${p.year}-${p.match.homeTeam}-${p.match.awayTeam}`; if(seen.has(key)) continue; seen.add(key); out.push(p); }

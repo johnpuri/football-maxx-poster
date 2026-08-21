@@ -20,3 +20,4 @@ jobs:
           FACEBOOK_ACCOUNT_ID: ${{ secrets.FACEBOOK_ACCOUNT_ID }}
           HIGHLIGHTLY_RAPIDAPI_KEY: ${{ secrets.HIGHLIGHTLY_RAPIDAPI_KEY }}
           SCOREBAT_TOKEN: ${{ secrets.SCOREBAT_TOKEN }}
+          CLUB_COUNTRY_RATIO: "0.8"

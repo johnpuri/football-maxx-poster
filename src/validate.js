@@ -1,7 +1,15 @@
 /**
  * validateHighlight — ensures only real game highlights are posted.
- * Checks: highlight keywords, banned keywords, video file validity (ffprobe/duration),
+ * Checks: highlight keywords, banned keywords, FIFA copyright block, video file validity (ffprobe/duration),
  * logo availability, YouTube link safety, cartoon detection (keyword + Kimi vision on thumbnail).
+ *
+ * FIFA COPYRIGHT SAFEGUARD (2026-08-20):
+ * World Cup Final highlights from FIFA.tv official channel are HIGH RISK — FIFA enforces Content ID
+ * and blocks 15s+ segments even with watermark/transformative edits. Validation REJECTS these entirely.
+ * Safe content: club leagues (Premier League, La Liga, Serie A, Bundesliga, Ligue 1, Champions League
+ * fan edits, Europa, FA Cup) have lower enforcement. Country games allowed at 20% weight but must avoid
+ * WC Finals. Watermark covering FIFA.tv + pad bar HIGH UP is applied for remaining content but NOT relied
+ * on for WC Finals — they are banned outright.
  */
 import fs from "fs";
 import { execSync } from "child_process";
@@ -20,6 +28,42 @@ export const BANNED_KEYWORDS = [
 const BANNED_REGEX = new RegExp(BANNED_KEYWORDS.join("|"), "i");
 // Strict: PES, eFootball etc always banned; FIFA only banned with game context
 const STRICT_BANNED = /cartoon|animation|animated|parody|442oons|pes|efootball|simulation|simulated|lego|minecraft|roblox|trailer/i;
+
+// FIFA high-risk block — WC Final from official FIFA channel is banned
+export const FIFA_OFFICIAL_UPLOADERS = ["fifa", "fifa tv", "fifatv", "fifa world cup", "fifa.com"];
+export const SAFE_LEAGUES = ["premier league", "la liga", "laliga", "serie a", "bundesliga", "ligue 1", "champions league", "ucl", "europa league", "europa", "fa cup"];
+export const BANNED_TOURNAMENTS_FINALS = [/world cup.*final/i, /fifa world cup final/i];
+
+export function isFifaHighRisk(highlight) {
+  const title = (highlight.title || "").toLowerCase();
+  const desc = (highlight.description || "").toLowerCase();
+  const league = (highlight.league || highlight.tournament || "").toLowerCase();
+  const uploader = (highlight.uploader || highlight.uploaderId || highlight.channel || highlight.uploader_id || "").toLowerCase();
+  const combined = `${title} ${desc} ${league}`;
+  const isWorldCup = /world cup/i.test(combined);
+  const isFinal = /final/i.test(combined);
+  const hasYear = /\b(19|20)\d{2}\b/.test(combined);
+  const hasFifaWcFinalPhrase = /fifa world cup final/i.test(combined) || (isWorldCup && isFinal);
+  const isOfficialFifaUploader = FIFA_OFFICIAL_UPLOADERS.some(u => uploader.includes(u)) || /fifa\.tv/i.test(uploader);
+  const hasFifaTvMarker = /fifa\.tv/i.test(title) || /fifa\.tv/i.test(desc);
+  // Rule 1: If title/description contains "FIFA World Cup Final" + year and uploader is FIFA official → block
+  if (/fifa world cup final/i.test(combined) && hasYear && (isOfficialFifaUploader || hasFifaTvMarker)) {
+    return { risk: true, reason: "FIFA World Cup Final + year from official FIFA channel (FIFA.tv) — high Content ID risk" };
+  }
+  // Rule 2: league contains World Cup and is Final and uploader official FIFA → block
+  if (isWorldCup && isFinal && isOfficialFifaUploader) {
+    return { risk: true, reason: "World Cup Final from official FIFA uploader — banned (Content ID block)" };
+  }
+  // Rule 3: Any World Cup Final highlight from FIFA.tv domain in title/desc is high risk
+  if (hasFifaWcFinalPhrase && (isOfficialFifaUploader || hasFifaTvMarker)) {
+    return { risk: true, reason: "World Cup Final highlights from FIFA.tv official are high risk — banned" };
+  }
+  // Rule 4: Any World Cup Final pattern is banned outright (prefer club game)
+  if (/world cup\s+\d{4}\s+final/i.test(combined)) {
+    return { risk: true, reason: "World Cup Final detected — banned to avoid FIFA copyright block (use club game instead)" };
+  }
+  return { risk: false };
+}
 
 export const HIGHLIGHT_KEYWORDS = [
   "highlight", "highlights", "goal", "goals", "vs", "vs.", "v ",
@@ -109,6 +153,12 @@ export async function validateHighlight(highlight, opts = {}) {
   // 2. Must NOT contain banned keywords
   if (containsBannedKeyword(combinedText)) {
     return { valid: false, reason: `Banned keyword detected in title/description — likely not real footage (cartoon/PES/FIFA game/simulation/trailer). Got: "${title.slice(0,80)}"`, details: { check: "bannedKeywords" } };
+  }
+
+  // 2b. FIFA copyright block — World Cup Finals are high risk (FIFA.tv Content ID)
+  const fifaRisk = isFifaHighRisk(highlight);
+  if (fifaRisk.risk) {
+    return { valid: false, reason: `FIFA copyright block: ${fifaRisk.reason}. Pick club game instead (Premier League, La Liga, Serie A, Bundesliga, Ligue 1, Champions League fan edits, Europa, FA Cup). Got: "${title.slice(0,80)}"`, details: { check: "fifaCopyright" } };
   }
 
   // 3. Cartoon check — keyword + vision on thumbnail
@@ -234,11 +284,11 @@ export async function pickValidHighlightFromCandidates(query, baseHighlight, dow
   for (let i = 0; i < lines.length - 1; i += 2) {
     const title = lines[i];
     const id = lines[i + 1];
-    if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
+    if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, uploader: "" });
   }
   if (!candidates.length) {
     const ids = out.split("\n").map(s => s.trim()).filter(s => /^[A-Za-z0-9_-]{6,}$/.test(s));
-    for (const id of ids) candidates.push({ id, title: "", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
+    for (const id of ids) candidates.push({ id, title: "", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, uploader: "" });
   }
   for (let idx = 0; idx < candidates.length; idx++) {
     const c = candidates[idx];
@@ -249,8 +299,14 @@ export async function pickValidHighlightFromCandidates(query, baseHighlight, dow
       videoUrl,
       embedUrl: videoUrl,
       thumbnail: c.thumbnail,
+      uploader: c.uploader || "",
     };
     console.log(`[validate] Trying candidate ${idx + 1}/${candidates.length}: ${c.id} — ${c.title}`);
+    // FIFA WC Final pre-check (title/uploader) — reject before download, pick club game instead
+    {
+      const candCheck = isFifaHighRisk({ title: c.title, description: c.title, league: baseHighlight.league || baseHighlight.tournament || "", uploader: c.uploader || "" });
+      if (candCheck.risk) { console.log(`[validate] Skipping FIFA high-risk candidate: ${c.title} — ${candCheck.reason}`); continue; }
+    }
     // Early cartoon keyword skip before download
     if (isCartoonVideoSync(c.title, "")) {
       console.log(`[validate] Skipping cartoon candidate: ${c.title}`);

@@ -99,6 +99,15 @@ No YouTube API is used anywhere.
 
 MIT
 
+## FIFA Copyright Block — Prevention (2026-08-20)
+
+- **Banned:** World Cup Final highlights from FIFA.tv official channel (high Content ID risk — 15s FIFA content blocked). `src/validate.js:isFifaHighRisk()` rejects any title/description containing "FIFA World Cup Final" + year when uploader is FIFA official, or any "World Cup {year} Final" pattern outright.
+- **Safe content (80% weight):** club leagues — Premier League, La Liga, Serie A, Bundesliga, Ligue 1, Champions League fan edits, Europa, FA Cup — lower enforcement.
+- **Country content (20% weight):** Euro/Copa/non-final World Cup games only. WC Finals excluded at picker + validator.
+- **Transformative fallback:** watermark covering FIFA.tv + pad bar HIGH UP (extended canvas above video) via `src/watermark.js` — but NOT relied on for WC Finals (banned entirely).
+- **Posting workflow pre-check:** before upload, scan via `isFifaHighRisk` (title/uploader check). OCR via ffprobe frame would be future; simple title/uploader check suffices now. `getRandomHistoricalPick()` weights club 80% vs country 20% and filters WC Finals; `CLUB_COUNTRY_RATIO=0.8` enforced in workflow.
+- **Auto-unpublish:** existing WC Final posts at risk were cancelled (IDs 6a87963a… etc.); validator prevents new ones.
+
 ## Copyright & Accuracy Safeguards (2026-08-20)
 
 - Do NOT post copyrighted official broadcast without permission. Always check `yt-dlp --dump-json` fields: `uploader`, `license`, `upload_date`.
