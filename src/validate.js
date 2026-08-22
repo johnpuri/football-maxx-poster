@@ -29,23 +29,43 @@ const BANNED_REGEX = new RegExp(BANNED_KEYWORDS.join("|"), "i");
 // Strict: PES, eFootball etc always banned; FIFA only banned with game context
 const STRICT_BANNED = /cartoon|animation|animated|parody|442oons|pes|efootball|simulation|simulated|lego|minecraft|roblox|trailer/i;
 
-// FIFA high-risk block — WC Final from official FIFA channel is banned
-export const FIFA_OFFICIAL_UPLOADERS = ["fifa", "fifa tv", "fifatv", "fifa world cup", "fifa.com"];
+// FIFA / copyright high-risk block — official broadcasters are aggressively Content-ID'd (15s FIFA block on FB)
+export const FIFA_OFFICIAL_UPLOADERS = ["fifa", "fifa tv", "fifatv", "fifa world cup", "fifaworldcup", "fifa.com"];
+export const COPYRIGHT_OFFICIAL_UPLOADERS = [
+  "fifa", "fifa tv", "fifatv", "fifa world cup", "fifaworldcup", "fifa.com",
+  "uefa", "uefa tv", "uefatv", "uefa.com",
+  "uefa champions league", "champions league official",
+];
 export const SAFE_LEAGUES = ["premier league", "la liga", "laliga", "serie a", "bundesliga", "ligue 1", "champions league", "ucl", "europa league", "europa", "fa cup"];
-export const BANNED_TOURNAMENTS_FINALS = [/world cup.*final/i, /fifa world cup final/i];
+export const BANNED_TOURNAMENTS_FINALS = [/world cup.*final/i, /fifa world cup final/i, /euro.*final/i, /champions league.*final/i, /ucl.*final/i];
 
 export function isFifaHighRisk(highlight) {
+  return isCopyrightHighRisk(highlight);
+}
+
+export function isCopyrightHighRisk(highlight) {
   const title = (highlight.title || "").toLowerCase();
   const desc = (highlight.description || "").toLowerCase();
   const league = (highlight.league || highlight.tournament || "").toLowerCase();
   const uploader = (highlight.uploader || highlight.uploaderId || highlight.channel || highlight.uploader_id || "").toLowerCase();
   const combined = `${title} ${desc} ${league}`;
   const isWorldCup = /world cup/i.test(combined);
+  const isEuro = /\beuro\b/i.test(combined) || /european championship/i.test(combined);
+  const isCopa = /copa america/i.test(combined);
+  const isUcl = /champions league/i.test(combined) || /\bucl\b/i.test(combined);
   const isFinal = /final/i.test(combined);
   const hasYear = /\b(19|20)\d{2}\b/.test(combined);
   const hasFifaWcFinalPhrase = /fifa world cup final/i.test(combined) || (isWorldCup && isFinal);
   const isOfficialFifaUploader = FIFA_OFFICIAL_UPLOADERS.some(u => uploader.includes(u)) || /fifa\.tv/i.test(uploader);
+  const isOfficialCopyrightUploader = COPYRIGHT_OFFICIAL_UPLOADERS.some(u => uploader.includes(u)) || /fifa\.tv/i.test(uploader) || /uefa\.tv/i.test(uploader);
   const hasFifaTvMarker = /fifa\.tv/i.test(title) || /fifa\.tv/i.test(desc);
+  const hasUefaTvMarker = /uefa\.tv/i.test(title) || /uefa\.tv/i.test(desc);
+  const hasFifaFinalTitle = /fifa/i.test(combined) && isFinal;
+
+  // Rule 0: Any title containing FIFA + final → skip (covers FIFA UCL/World Cup finals, FIFA-branded finals)
+  if (hasFifaFinalTitle) {
+    return { risk: true, reason: "Title contains FIFA + final — high copyright risk (FIFA Content ID, 15s block) — banned" };
+  }
   // Rule 1: If title/description contains "FIFA World Cup Final" + year and uploader is FIFA official → block
   if (/fifa world cup final/i.test(combined) && hasYear && (isOfficialFifaUploader || hasFifaTvMarker)) {
     return { risk: true, reason: "FIFA World Cup Final + year from official FIFA channel (FIFA.tv) — high Content ID risk" };
@@ -61,6 +81,26 @@ export function isFifaHighRisk(highlight) {
   // Rule 4: Any World Cup Final pattern is banned outright (prefer club game)
   if (/world cup\s+\d{4}\s+final/i.test(combined)) {
     return { risk: true, reason: "World Cup Final detected — banned to avoid FIFA copyright block (use club game instead)" };
+  }
+  // Rule 5: World Cup / Euro / Copa America finals from official broadcasters → banned (only fan edits with transform allowed, prefer club leagues)
+  if ((isWorldCup || isEuro || isCopa) && isFinal && isOfficialCopyrightUploader) {
+    return { risk: true, reason: "International tournament final (World Cup/Euro/Copa) from official broadcaster (FIFA/UEFA) — high Content ID risk — banned, use fan edit or club league instead" };
+  }
+  // Rule 5b: Any Euro/Copa final pattern outright (even without uploader) — prefer club leagues
+  if (/(euro|copa america)\s*\d{4}\s*final/i.test(combined) || /euro\s+final/i.test(combined) && hasYear) {
+    return { risk: true, reason: "Euro/Copa America Final detected — banned to avoid copyright block (prefer club league fan edit)" };
+  }
+  // Rule 6: UCL Final from official UEFA/FIFA channel → banned (high enforcement)
+  if (isUcl && isFinal && (isOfficialCopyrightUploader || hasUefaTvMarker || hasFifaTvMarker)) {
+    return { risk: true, reason: "UCL Final from official UEFA/FIFA channel — high Content ID risk — banned, prefer fan channel transformative edit" };
+  }
+  // Rule 6b: UCL Final with FIFA marker in title → banned
+  if (isUcl && isFinal && /fifa/i.test(combined)) {
+    return { risk: true, reason: "UCL Final with FIFA marker — banned (FIFA Content ID)" };
+  }
+  // Rule 7: Any finals highlight from strictly official uploader + FIFA/UEFA tv marker → banned
+  if (isFinal && (hasFifaTvMarker || hasUefaTvMarker) && isOfficialCopyrightUploader) {
+    return { risk: true, reason: "Final from official FIFA/UEFA TV channel — banned (Content ID)" };
   }
   return { risk: false };
 }
