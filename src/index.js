@@ -145,23 +145,93 @@ function tryYtDlpSearch(query) {
   return url;
 }
 
-function tryYtDlpSearchFilteredSync(query) {
+// --- High-liked filtering: dump-json + sort by view_count/like_count ---
+function parseYtDlpJsonOutput(out) {
+  const candidates = [];
+  for (const line of out.split("\n").filter(Boolean)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const j = JSON.parse(trimmed);
+      if (!j.id) continue;
+      candidates.push({
+        id: j.id,
+        title: j.title || j.fulltitle || "",
+        view_count: j.view_count ?? j.viewCount ?? 0,
+        like_count: j.like_count ?? j.likeCount ?? 0,
+        comment_count: j.comment_count ?? j.commentCount ?? 0,
+        uploader: j.uploader || j.uploader_id || j.channel || "",
+        thumbnail: j.thumbnail || `https://img.youtube.com/vi/${j.id}/hqdefault.jpg`,
+        _raw: j,
+      });
+    } catch {}
+  }
+  return candidates;
+}
+function filterAndSortByPopularity(candidates) {
+  // Filter: skip low-view shit (<10k views) and require high engagement
+  const highQuality = candidates.filter(c => {
+    const vc = c.view_count || 0;
+    const lc = c.like_count || 0;
+    const cc = c.comment_count || 0;
+    // Primary: must have at least 10k views to not be shit
+    if (vc < 10000) return false;
+    // Secondary: highlight high-liked = view_count>50000 OR like_count>1000 OR comment_count>200
+    return vc > 50000 || lc > 1000 || cc > 200;
+  });
+  const pool = highQuality.length ? highQuality : candidates.filter(c => (c.view_count||0) >= 10000);
+  const sortPool = pool.length ? pool : candidates;
+  // Sort by view_count descending, then like_count descending, then comment_count
+  sortPool.sort((a,b) => {
+    if ((b.view_count||0) !== (a.view_count||0)) return (b.view_count||0) - (a.view_count||0);
+    if ((b.like_count||0) !== (a.like_count||0)) return (b.like_count||0) - (a.like_count||0);
+    return (b.comment_count||0) - (a.comment_count||0);
+  });
+  // Log filtering
+  if (candidates.length && sortPool.length) {
+    console.log(`[yt-dlp] ${candidates.length} candidates → ${pool.length ? pool.length+' high-quality' : 'fallback'} → top view=${sortPool[0].view_count} likes=${sortPool[0].like_count} "${sortPool[0].title.slice(0,60)}"`);
+  }
+  return sortPool;
+}
+function getCandidatesViaDumpJson(query, count=10) {
   try {
-    // Fetch up to 5 candidates and skip cartoon/animated via keyword filter (sync)
+    const out = execSync(`yt-dlp "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8" }).trim();
+    if (!out) return [];
+    const cands = parseYtDlpJsonOutput(out);
+    if (cands.length) return filterAndSortByPopularity(cands);
+  } catch (e) {
+    console.warn(`[yt-dlp] dump-json failed for "${query}": ${e.message?.slice(0,200)}`);
+  }
+  return [];
+}
+
+function tryYtDlpSearchFilteredSync(query) {
+  // Try high-liked dump-json path (ytsearch10 sorted by view_count)
+  const sorted = getCandidatesViaDumpJson(query, 10);
+  if (sorted.length) {
+    for (const c of sorted) {
+      if (isCartoonVideoSync(c.title, "")) {
+        console.log(`[cartoonFilter] skipping cartoon (keyword): ${c.id} — ${c.title} (views=${c.view_count})`);
+        continue;
+      }
+      return `https://www.youtube.com/watch?v=${c.id}`;
+    }
+    // all were cartoon, fallback to top non-cartoon check failed — return top
+    return `https://www.youtube.com/watch?v=${sorted[0].id}`;
+  }
+  // Fallback to old --get-id --get-title path (no view metadata)
+  try {
     const out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
     const lines = out.split("\n").filter(Boolean);
-    // yt-dlp --get-id --get-title emits: title \n id \n title \n id ...
-    // Actually with both flags it prints title then id per entry
     const candidates = [];
     for (let i = 0; i < lines.length - 1; i += 2) {
       const title = lines[i];
       const id = lines[i + 1];
-      if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title });
+      if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title, view_count: 0, like_count: 0 });
     }
-    // If parsing didn't yield pairs, fall back to id-only
     if (!candidates.length) {
       const ids = out.split("\n").map(s => s.trim()).filter(s => /^[A-Za-z0-9_-]{6,}$/.test(s));
-      for (const id of ids) candidates.push({ id, title: "" });
+      for (const id of ids) candidates.push({ id, title: "", view_count: 0, like_count: 0 });
     }
     for (const c of candidates) {
       if (isCartoonVideoSync(c.title, "")) {
@@ -170,10 +240,8 @@ function tryYtDlpSearchFilteredSync(query) {
       }
       return `https://www.youtube.com/watch?v=${c.id}`;
     }
-    // fallback: first id if all filtered (should not happen)
     if (candidates.length) return `https://www.youtube.com/watch?v=${candidates[0].id}`;
   } catch {}
-  // Fallback to single search
   try {
     const id = execSync(`yt-dlp "ytsearch1:${query}" --get-id --no-warnings 2>/dev/null | head -n1`, { timeout: 15000, encoding: "utf8" }).trim();
     if (id && /^[A-Za-z0-9_-]{6,}$/.test(id)) return `https://www.youtube.com/watch?v=${id}`;
@@ -198,8 +266,21 @@ async function downloadVideoFile(videoUrl, id) {
   return null;
 }
 
-// Async version that also does Kimi WebBridge vision check on thumbnail (real match footage only)
+// Async version that also does Kimi WebBridge vision check on thumbnail (real match footage only) — high-liked sorted
 export async function tryYtDlpSearchFiltered(query) {
+  const sorted = getCandidatesViaDumpJson(query, 10);
+  if (sorted.length) {
+    for (const c of sorted) {
+      const isCartoon = await isCartoonVideo(c.title, "", c.thumbnail);
+      if (isCartoon) {
+        console.log(`[cartoonFilter] skipping cartoon (keyword+vision): ${c.id} — ${c.title} (views=${c.view_count})`);
+        continue;
+      }
+      return `https://www.youtube.com/watch?v=${c.id}`;
+    }
+    return `https://www.youtube.com/watch?v=${sorted[0].id}`;
+  }
+  // Fallback to old path
   try {
     const out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
     const lines = out.split("\n").filter(Boolean);
@@ -223,7 +304,7 @@ export async function tryYtDlpSearchFiltered(query) {
     }
     if (candidates.length) return `https://www.youtube.com/watch?v=${candidates[0].id}`;
   } catch (e) {
-    console.warn("tryYtDlpSearchFiltered failed:", e.message);
+    console.warn("tryYtDlpSearchFiltered fallback failed:", e.message);
   }
   return tryYtDlpSearchFilteredSync(query);
 }
@@ -273,12 +354,26 @@ async function main() {
           // Try to find next valid candidate via ytsearch iteration (metadata-only, no download)
           const { execSync: _exec } = await import("child_process");
           try {
-            const out = _exec(`yt-dlp "ytsearch5:${h.query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
-            const lines = out.split("\n").filter(Boolean);
-            const cands = [];
-            for (let i = 0; i < lines.length - 1; i += 2) {
-              const title = lines[i]; const id = lines[i+1];
-              if (/^[A-Za-z0-9_-]{6,}$/.test(id)) cands.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg` });
+            // Use dump-json for high-liked sorting
+            let cands = [];
+            try {
+              const jout = _exec(`yt-dlp "ytsearch10:${h.query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8" }).trim();
+              for (const line of jout.split("\n").filter(Boolean)) {
+                if (!line.trim().startsWith("{")) continue;
+                try { const j=JSON.parse(line); if(j.id) cands.push({ id:j.id, title:j.title||"", thumbnail:j.thumbnail||`https://img.youtube.com/vi/${j.id}/hqdefault.jpg`, view_count:j.view_count||0, like_count:j.like_count||0, comment_count:j.comment_count||0 }); } catch {}
+              }
+              cands.sort((a,b)=>(b.view_count||0)-(a.view_count||0)||(b.like_count||0)-(a.like_count||0));
+              const hi=cands.filter(c=>(c.view_count||0)>=10000 && ((c.view_count>50000)||(c.like_count>1000)||(c.comment_count>200)));
+              const pool=hi.length?hi:cands.filter(c=>(c.view_count||0)>=10000);
+              cands=pool.length?pool:cands;
+            } catch {}
+            if (!cands.length) {
+              const out = _exec(`yt-dlp "ytsearch5:${h.query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+              const lines = out.split("\n").filter(Boolean);
+              for (let i = 0; i < lines.length - 1; i += 2) {
+                const title = lines[i]; const id = lines[i+1];
+                if (/^[A-Za-z0-9_-]{6,}$/.test(id)) cands.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, view_count:0, like_count:0 });
+              }
             }
             let found = false;
             for (const c of cands) {

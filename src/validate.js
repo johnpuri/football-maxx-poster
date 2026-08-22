@@ -362,20 +362,45 @@ function extractYoutubeId(url) {
 export async function pickValidHighlightFromCandidates(query, baseHighlight, downloadFn) {
   const { execSync } = await import("child_process");
   const { isCartoonVideo } = await import("./cartoonFilter.js");
-  let out = "";
-  try {
-    out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
-  } catch { return null; }
-  const lines = out.split("\n").filter(Boolean);
-  const candidates = [];
-  for (let i = 0; i < lines.length - 1; i += 2) {
-    const title = lines[i];
-    const id = lines[i + 1];
-    if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, uploader: "" });
+  function parseDumpJson(out) {
+    const cands = [];
+    for (const line of out.split("\n").filter(Boolean)) {
+      if (!line.trim().startsWith("{")) continue;
+      try {
+        const j = JSON.parse(line);
+        if (!j.id) continue;
+        cands.push({ id: j.id, title: j.title || "", thumbnail: j.thumbnail || `https://img.youtube.com/vi/${j.id}/hqdefault.jpg`, uploader: j.uploader || j.uploader_id || "", view_count: j.view_count||0, like_count: j.like_count||0, comment_count: j.comment_count||0 });
+      } catch {}
+    }
+    // sort by view_count desc like index.js
+    cands.sort((a,b) => (b.view_count||0)-(a.view_count||0) || (b.like_count||0)-(a.like_count||0));
+    // filter high-liked >=10k views, prefer >50k or >1k likes
+    const hi = cands.filter(c => (c.view_count||0)>=10000 && ((c.view_count>50000)||(c.like_count>1000)||(c.comment_count>200)));
+    const pool = hi.length ? hi : cands.filter(c=>(c.view_count||0)>=10000);
+    return (pool.length?pool:cands);
   }
+  let candidates = [];
+  // Try dump-json first (10 candidates sorted by popularity)
+  try {
+    let out = execSync(`yt-dlp "ytsearch10:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8" }).trim();
+    if (out) candidates = parseDumpJson(out);
+  } catch {}
   if (!candidates.length) {
-    const ids = out.split("\n").map(s => s.trim()).filter(s => /^[A-Za-z0-9_-]{6,}$/.test(s));
-    for (const id of ids) candidates.push({ id, title: "", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, uploader: "" });
+    // Fallback to old title/id
+    let out = "";
+    try {
+      out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+    } catch { return null; }
+    const lines = out.split("\n").filter(Boolean);
+    for (let i = 0; i < lines.length - 1; i += 2) {
+      const title = lines[i];
+      const id = lines[i + 1];
+      if (/^[A-Za-z0-9_-]{6,}$/.test(id)) candidates.push({ id, title, thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, uploader: "", view_count: 0, like_count: 0, comment_count: 0 });
+    }
+    if (!candidates.length) {
+      const ids = out.split("\n").map(s => s.trim()).filter(s => /^[A-Za-z0-9_-]{6,}$/.test(s));
+      for (const id of ids) candidates.push({ id, title: "", thumbnail: `https://img.youtube.com/vi/${id}/hqdefault.jpg`, uploader: "", view_count: 0, like_count: 0, comment_count: 0 });
+    }
   }
   for (let idx = 0; idx < candidates.length; idx++) {
     const c = candidates[idx];
