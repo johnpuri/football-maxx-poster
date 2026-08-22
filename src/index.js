@@ -6,7 +6,7 @@ import "dotenv/config";
 import { config } from "./config.js";
 import { fetchHighlights, filterAndRank } from "./highlightly.js";
 import { fetchScorebatHighlights, filterAndRankScorebat } from "./scorebat.js";
-import { createFacebookPost, extractPostId, verifyPostPublished, isPostVerified, containsFacebookError } from "./zernio.js";
+import { createFacebookPost, extractPostId, verifyPostPublished, isPostVerified, containsFacebookError, presignUploadStrict, validateMediaUrlsStrict, getPost, deletePost, unpublishPost, listPosts, cleanupEmptyPosts } from "./zernio.js";
 import { formatPost } from "./formatter.js";
 import { getRandomHistoricalPick, finalToHighlight, pickRandomYear, TOURNAMENTS } from "./historical.js";
 import { isCartoonVideoSync, isCartoonVideo, pickFirstRealVideo } from "./cartoonFilter.js";
@@ -17,12 +17,45 @@ import fs from "fs";
 import { execSync } from "child_process";
 
 const POSTED_FILE = "./posted.json";
+const POSTED_FILE_SRC = "./src/posted.json";
+const POSTED_FILE_TMP = "/tmp/posted_set.json";
 
 function loadPosted() {
-  try { return new Set(JSON.parse(fs.readFileSync(POSTED_FILE, "utf8"))); } catch { return new Set(); }
+  const set = new Set();
+  for (const p of [POSTED_FILE, POSTED_FILE_SRC, POSTED_FILE_TMP]) {
+    try { for (const k of JSON.parse(fs.readFileSync(p, "utf8"))) set.add(k); } catch {}
+  }
+  return set;
 }
 function savePosted(set) {
-  fs.writeFileSync(POSTED_FILE, JSON.stringify([...set], null, 2));
+  const arr = [...set].sort();
+  for (const p of [POSTED_FILE, POSTED_FILE_SRC, POSTED_FILE_TMP]) {
+    try { fs.writeFileSync(p, JSON.stringify(arr, null, 2)); } catch {}
+  }
+}
+function normalizeTeam(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+export function highlightPostedKeys(h){
+  const keys=[];
+  if(h.id) keys.push(h.id);
+  const year = h.year || (h.date? String(new Date(h.date).getFullYear()): "") || (h.league?.match(/\b(19|20)\d{2}\b/)?.[0]||"");
+  const tourn = (h.tournament||h.league||"").toString();
+  const tNorm = tourn.toLowerCase().replace(/\s+/g,"-").replace(/[^a-z0-9\-]/g,"");
+  const ht = normalizeTeam(h.homeTeam||"");
+  const at = normalizeTeam(h.awayTeam||"");
+  if(ht && at && year){
+    keys.push(`${ht}_vs_${at}_${year}_${tNorm}`);
+    keys.push(`${at}_vs_${ht}_${year}_${tNorm}`);
+    keys.push(`${ht}_vs_${at}_${year}`);
+    keys.push(`${at}_vs_${ht}_${year}`);
+    keys.push(`historic-${tNorm}-${year}-${ht}-vs-${at}`);
+    keys.push(`historic-${tNorm}-${year}-${at}-vs-${ht}`);
+  }
+  return keys;
+}
+export function isAlreadyPosted(h, postedSet){
+  if(postedSet.has(h.id)) return true;
+  for(const k of highlightPostedKeys(h)) if(postedSet.has(k)) return true;
+  return false;
 }
 
 async function getHighlights() {
@@ -202,7 +235,7 @@ async function main() {
   if (historicPick) console.log(`Historical header: ${historicPick.tournament} ${historicPick.year}`);
   console.log(`Found ${highlights.length} highlights`);
 
-  const fresh = highlights.filter((h) => !posted.has(h.id)).slice(0, config.maxHighlightsPerRun);
+  const fresh = highlights.filter((h) => !isAlreadyPosted(h, posted)).slice(0, config.maxHighlightsPerRun * 3);
   // Cartoon filter: drop any highlight whose title/description looks cartoon/animated
   const filteredFresh = fresh.filter(h => {
     if (isCartoonVideoSync(h.title || "", h.description || h.league || "")) {
@@ -271,6 +304,7 @@ async function main() {
       console.log(`[DRY RUN] Would post (video reel only): ${h.title}`);
       if (h.videoUrl || h.embedUrl) console.log(`[DRY RUN] videoUrl present but NOT added to content — would download video file for reel: ${h.videoUrl || h.embedUrl}`);
       posted.add(h.id);
+      for(const k of highlightPostedKeys(h)) posted.add(k);
       savePosted(posted);
       continue;
     }
@@ -350,19 +384,55 @@ async function main() {
     }
     console.log(`[validate] ✓ Highlight passed validation: ${h.title}`);
 
-    // --- Post with verification + retry (max 3 retries using next candidates) ---
+    // === STRICT PRE-PUBLISH: presign upload with size>1M + PUT 200 + https://media.zernio.com ===
+    let strictMediaUrl;
+    try {
+      const fileForUpload = localVideoPath || mediaUrls[0];
+      if (!fileForUpload || !fs.existsSync(fileForUpload)) throw new Error(`no local video file for strict upload: ${fileForUpload}`);
+      const sz = fs.statSync(fileForUpload).size;
+      if (sz < 1_000_000) throw new Error(`video file too small ${sz} < 1M`);
+      console.log(`[strict] Presigning upload for ${fileForUpload} (${Math.round(sz/1024/1024)}MB)...`);
+      strictMediaUrl = await presignUploadStrict(fileForUpload);
+      console.log(`[strict] ✓ Upload OK: ${strictMediaUrl}`);
+      if (!strictMediaUrl.startsWith("https://media.zernio.com")) throw new Error(`mediaUrl not https://media.zernio.com: ${strictMediaUrl}`);
+      validateMediaUrlsStrict([strictMediaUrl]);
+      // Remove any path where mediaUrls could be empty — from here on only strictMediaUrl is used
+      mediaUrls = [strictMediaUrl];
+    } catch (e) {
+      console.warn(`[strict] Pre-publish upload FAILED for ${h.title}: ${e.message} — blacklisting and trying next candidate`);
+      // blacklist this candidate
+      posted.add(h.id);
+      for (const k of highlightPostedKeys(h)) posted.add(k);
+      savePosted(posted);
+      // try next candidate via pickValidHighlight if available
+      if (h.query) {
+        const picked = await pickValidHighlightFromCandidates(h.query, h, downloadVideoFile);
+        if (picked) {
+          h = picked.highlight;
+          localVideoPath = picked.videoPath;
+          try {
+            strictMediaUrl = await presignUploadStrict(localVideoPath);
+            mediaUrls = [strictMediaUrl];
+            console.log(`[strict] Retry upload OK: ${strictMediaUrl}`);
+          } catch (e2) { console.warn(`[strict] Retry upload also failed: ${e2.message} — skipping`); continue; }
+        } else continue;
+      } else continue;
+    }
+
+    // --- Post with verification + retry (max 5 retries, strict post-publish check) ---
     let postVerified = false;
     let postResult = null;
     let postId = null;
     let verifyRetries = 2; // poll GET /posts/{id} up to 3 times
-    const MAX_POST_RETRIES = 3;
+    const MAX_POST_RETRIES = 5;
     let retryCount = 0;
     // current highlight pointer stays as h; on failure consume next candidate from toPost array
     let currentIdx = idx;
     // we need mutable reference to highlight for retries
     let candidate = h;
-    let candidateMediaUrls = mediaUrls;
+    let candidateMediaUrls = [strictMediaUrl]; // strictly validated only
     let candidateLocalPath = localVideoPath;
+    const blacklisted = new Set();
 
     while (retryCount <= MAX_POST_RETRIES) {
       try {
@@ -371,6 +441,9 @@ async function main() {
           console.warn(`[SAFETY] Skipping post with YouTube link in content: ${candidate.title}`);
           throw new Error("YouTube link in content");
         }
+        // STRICT: re-validate mediaUrls before every POST — no empty path
+        validateMediaUrlsStrict(candidateMediaUrls);
+        if (!candidateMediaUrls[0].startsWith("https://media.zernio.com")) throw new Error("mediaUrl not https://media.zernio.com");
         postResult = await createFacebookPost({ content: contentToPost, mediaUrls: candidateMediaUrls, publishNow: true });
         const payloadStr = JSON.stringify(postResult);
         if (containsFacebookError(payloadStr) && /moved|rejected|blocked/i.test(payloadStr)) {
@@ -382,20 +455,42 @@ async function main() {
           console.warn(`[verify] No postId extracted from result, treating as failure`);
           throw new Error("No postId in create response");
         }
-        // Verify via GET /posts/{id} — status published, platforms[0].status published, mediaItems video, platformPostUrl exists
+        // === STRICT POST-PUBLISH CHECK: GET post, if mediaItems 0 or content empty or platforms[0] status not published, DELETE/unpublish + blacklist + retry ===
         const ver = await verifyPostPublished(postId, { retries: verifyRetries, delayMs: 3000 });
-        if (ver.verified) {
-          console.log(`[verify] ✓ Post verified: ${postId} — ${ver.reason}`);
-          postVerified = true;
+        // Also direct GET check for strict emptiness even if isPostVerified says something else
+        let strictFail = null;
+        if (!ver.verified) strictFail = ver.reason;
+        else {
+          const fresh = await getPost(postId);
+          const emptyMedia = !Array.isArray(fresh.mediaItems) || fresh.mediaItems.length === 0;
+          const emptyContent = !fresh.content || fresh.content.trim().length === 0;
+          const platStatus = fresh.platforms?.[0]?.status;
+          if (emptyMedia) strictFail = "post-publish check: mediaItems.length 0";
+          else if (emptyContent) strictFail = "post-publish check: content empty";
+          else if (platStatus !== "published") strictFail = `post-publish check: platforms[0].status=${platStatus} not published`;
+        }
+        if (strictFail) {
+          console.warn(`[post-publish] ✗ Post ${postId} FAILED strict check: ${strictFail} — deleting/unpublishing + blacklisting`);
+          try {
+            const un = await unpublishPost(postId);
+            console.log(`[post-publish] unpublish ${postId} => ${un.status}`);
+            if (!un.ok) { const del = await deletePost(postId); console.log(`[post-publish] delete ${postId} => ${del.status}`); }
+          } catch (e2) { console.warn(`[post-publish] cleanup error: ${e2.message}`); }
+          // blacklist candidate
+          blacklisted.add(candidate.id);
+          for (const k of highlightPostedKeys(candidate)) blacklisted.add(k);
+          posted.add(candidate.id);
+          for (const k of highlightPostedKeys(candidate)) posted.add(k);
+          savePosted(posted);
+          throw new Error(`Post-publish strict check failed: ${strictFail}`);
+        }
+        console.log(`[verify] ✓ Post verified: ${postId} — ${ver.reason}`);
+        postVerified = true;
           // update h to successful candidate for posted.json
           h = candidate;
           mediaUrls = candidateMediaUrls;
           localVideoPath = candidateLocalPath;
           break;
-        } else {
-          console.warn(`[verify] ✗ Post NOT verified (${postId}): ${ver.reason}`);
-          throw new Error(`Verification failed: ${ver.reason}`);
-        }
       } catch (e) {
         const isFbError = /moved|rejected|blocked/i.test(e.message || "");
         console.warn(`[post] Attempt ${retryCount + 1}/${MAX_POST_RETRIES + 1} failed${isFbError ? " (Facebook moved/rejected/blocked)" : ""}: ${e.message?.slice(0,400)}`);
@@ -436,8 +531,21 @@ async function main() {
           retryCount++;
           continue;
         }
+        // STRICT: presign next candidate's video before retry
+        let nextStrictUrl;
+        try {
+          const f2 = nextLocal || nextMedia[0];
+          if (!fs.existsSync(f2)) throw new Error(`file not found ${f2}`);
+          if (fs.statSync(f2).size < 1_000_000) throw new Error(`file too small <1M`);
+          nextStrictUrl = await presignUploadStrict(f2);
+          validateMediaUrlsStrict([nextStrictUrl]);
+        } catch (e3) {
+          console.warn(`[strict] Next candidate presign failed: ${e3.message} — skipping`);
+          posted.add(next.id); for (const k of highlightPostedKeys(next)) posted.add(k); savePosted(posted);
+          currentIdx = nextIdx; idx = nextIdx; retryCount++; continue;
+        }
         candidate = next;
-        candidateMediaUrls = nextMedia;
+        candidateMediaUrls = [nextStrictUrl];
         candidateLocalPath = nextLocal;
         currentIdx = nextIdx;
         idx = nextIdx; // advance outer loop so we don't reprocess consumed candidate
@@ -450,6 +558,7 @@ async function main() {
       continue;
     }
     posted.add(h.id);
+    for(const k of highlightPostedKeys(h)) posted.add(k);
     savePosted(posted);
   }
   console.log("Done. Posted IDs saved to posted.json");

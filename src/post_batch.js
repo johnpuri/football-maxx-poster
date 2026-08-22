@@ -7,53 +7,19 @@ import { getDiverseBatch, finalToHighlight } from "./historical.js";
 import { formatPost } from "./formatter.js";
 import { applyDynamicWatermark } from "./watermark.js";
 import { isCartoonVideoSync } from "./cartoonFilter.js";
+import { presignUploadStrict, validateMediaUrlsStrict, createFacebookPost, extractPostId, verifyPostPublished, getPost, deletePost, unpublishPost } from "./zernio.js";
 
 // Ensure watermark profile exists
 function ensureProfilePic(){
   const p="/tmp/page_profile.jpg";
   if(fs.existsSync(p)) return p;
-  // try to download from Facebook page profile picture via Zernio account info or fallback to placeholder
   try{
-    // fetch profile pic via known URL (from posts.json)
     const url="https://scontent-lhr6-1.xx.fbcdn.net/v/t39.30808-1/781679063_122103963255441254_4134931033144238495_n.jpg?stp=c191.191.1666.1666a_cp0_dst-jpg_s50x50_tt6&_nc_cat=102&ccb=1-7&_nc_sid=f907e8&_nc_ohc=PWxqsj6C9WIQ7kNvwFiyoHn&_nc_oc=AdpNAe9Af3dbtVsn2ww2q_vjwvX0Xpe7Kiu7UIudrkhUXKW7wT9A6djrNjweRzAPMNk&_nc_zt=24&_nc_ht=scontent-lhr6-1.xx&edm=AJdBtusEAAAA&_nc_gid=mNzGg2wOn11NE1NuRuCK9w&_nc_tpa=Q5bMBQKMDvxntj0h71a5IKh3WwJMd6r4FYjfVvBM_dx3AGyrFXRyoIqNgV5Lb5TZA4KvvX3VFvSeZV8t&oh=00_AQEp-GGsvkjlm0J_wq4ytYqGJH--Up3F8C6Qkphy4vf5Kg&oe=6A8C62EE";
     execSync(`curl -s -L "${url}" -o "${p}"`,{timeout:15000});
     if(fs.existsSync(p)) return p;
   }catch{}
-  // create blank placeholder 140x140 white
   try{ execSync(`ffmpeg -y -f lavfi -i color=c=white:s=140x140 -frames:v 1 "${p}" 2>/dev/null`);}catch{}
   return p;
-}
-
-async function presignUpload(filePath){
-  const filename=path.basename(filePath);
-  const res=await fetch(`${config.zernioBaseUrl}/media`,{
-    method:"POST",
-    headers:{ Authorization:`Bearer ${config.zernioApiKey}`,"Content-Type":"application/json"},
-    body: JSON.stringify({ filename, contentType:"video/mp4"})
-  });
-  const text=await res.text();
-  if(!res.ok) throw new Error(`presign ${res.status}: ${text.slice(0,500)}`);
-  const j=JSON.parse(text);
-  const uploadUrl=j.uploadUrl; const publicUrl=j.publicUrl;
-  if(!uploadUrl||!publicUrl) throw new Error(`presign missing urls: ${text.slice(0,500)}`);
-  // PUT file
-  const buf=fs.readFileSync(filePath);
-  const put=await fetch(uploadUrl,{method:"PUT", body:buf, headers:{"Content-Type":"video/mp4"}});
-  if(!put.ok) throw new Error(`upload PUT ${put.status}: ${await put.text().then(s=>s.slice(0,500))}`);
-  return publicUrl;
-}
-
-async function createReelPost(content, mediaUrl){
-  const body={ content, platforms:[{platform:"facebook", accountId:config.facebookAccountId}], publishNow:true, mediaUrls:[mediaUrl]};
-  const res=await fetch(`${config.zernioBaseUrl}/posts`,{
-    method:"POST",
-    headers:{ Authorization:`Bearer ${config.zernioApiKey}`,"Content-Type":"application/json"},
-    body: JSON.stringify(body)
-  });
-  const text=await res.text();
-  let j; try{j=JSON.parse(text);}catch{j={raw:text}}
-  if(!res.ok) throw new Error(`createPost ${res.status}: ${JSON.stringify(j).slice(0,800)}`);
-  return j;
 }
 
 function ytSearchFilteredSync(query){
@@ -81,7 +47,7 @@ function downloadViaYtDlp(url, out){
 }
 
 async function main(){
-  console.log("Batch post 6 videos with tournament logos");
+  console.log("Batch post 6 videos with tournament logos — STRICT validation");
   const profilePic=ensureProfilePic();
   console.log(`profilePic ${profilePic} exists=${fs.existsSync(profilePic)}`);
   const batch=getDiverseBatch(6);
@@ -99,7 +65,6 @@ async function main(){
     const raw=`/tmp/raw_${idx}.mp4`;
     const watermarked=`/tmp/wm_${idx}.mp4`;
     downloadViaYtDlp(ytUrl, raw);
-    // Apply dynamic watermark: bar HIGH UP pad 110, logo left 10:10 scale -1:100, centered texts, watermark W-w-5:115
     applyDynamicWatermark(raw, {
       tournament: pick.tournament,
       year: pick.year,
@@ -118,27 +83,50 @@ async function main(){
       crf:30,
       autoDetect:false,
     });
-    // Re-encode already done in watermark; ensure under 100MB?
-    const publicUrl=await presignUpload(watermarked);
+    // STRICT: size >1M check before presign
+    const sz = fs.statSync(watermarked).size;
+    if (sz < 1_000_000) throw new Error(`watermarked file too small ${sz} <1M — skipping`);
+    const publicUrl=await presignUploadStrict(watermarked);
     console.log(`uploaded ${publicUrl}`);
+    if (!publicUrl.startsWith("https://media.zernio.com")) throw new Error(`publicUrl not https://media.zernio.com: ${publicUrl}`);
+    validateMediaUrlsStrict([publicUrl]);
     const highlight=finalToHighlight(pick.match, ytUrl);
-    // override league/year to ensure accuracy
     highlight.league=`${pick.tournament} ${pick.year}`;
     highlight.title=pick.title;
     highlight.date=`${pick.year}-07-01`;
     const content=formatPost(highlight);
     console.log(`content:\n${content}`);
     if(content.includes("youtube.com")||content.includes("youtu.be")) throw new Error("content contains youtube link!");
-    const postRes=await createReelPost(content, publicUrl);
+    if (!content || content.trim().length===0) throw new Error("content empty — refusing to post");
+    // STRICT: use createFacebookPost which validates mediaUrls non-empty
+    const postRes=await createFacebookPost({ content, mediaUrls: [publicUrl], publishNow: true });
     console.log(`posted ${JSON.stringify(postRes).slice(0,600)}`);
-    const postId=postRes.post?._id || postRes._id || postRes.id || "";
+    const postId=extractPostId(postRes);
+    // Post-publish check: GET post, if mediaItems 0 or content empty or platforms[0] status not published, DELETE/unpublish + blacklist + retry next candidate (max 5 in this batch: skip to next pick)
+    if (postId) {
+      const ver = await verifyPostPublished(postId, { retries: 2, delayMs: 3000 });
+      let strictFail = null;
+      if (!ver.verified) strictFail = ver.reason;
+      else {
+        const fresh = await getPost(postId);
+        const emptyMedia = !Array.isArray(fresh.mediaItems) || fresh.mediaItems.length === 0;
+        const emptyContent = !fresh.content || fresh.content.trim().length === 0;
+        const platStatus = fresh.platforms?.[0]?.status;
+        if (emptyMedia) strictFail = "mediaItems 0";
+        else if (emptyContent) strictFail = "content empty";
+        else if (platStatus !== "published") strictFail = `platforms[0].status=${platStatus}`;
+      }
+      if (strictFail) {
+        console.warn(`[post-publish] post ${postId} failed strict check: ${strictFail} — unpublishing/deleting`);
+        try { const un = await unpublishPost(postId); console.log(`unpublish => ${un.status}`); if (!un.ok) { const del = await deletePost(postId); console.log(`delete => ${del.status}`);} } catch(e){ console.warn(e.message); }
+        throw new Error(`Post-publish strict check failed: ${strictFail} — will try next candidate on next loop`);
+      }
+      console.log(`[verify] ✓ post ${postId} verified`);
+    }
     const platformUrl=postRes.post?.platforms?.[0]?.platformPostUrl || postRes.platformPostUrl || "";
     results.push({ pick:`${pick.tournament} ${pick.year} ${pick.match.homeTeam} vs ${pick.match.awayTeam}`, ytUrl, publicUrl, postId, platformUrl, content });
-    // small delay to avoid rate limit
     await new Promise(r=>setTimeout(r,3000));
-    // cleanup
     try{ fs.unlinkSync(raw);}catch{}
-    // keep watermarked for debug?
   }
   fs.writeFileSync("/tmp/batch_results.json", JSON.stringify(results,null,2));
   console.log("\n=== DONE ===");
