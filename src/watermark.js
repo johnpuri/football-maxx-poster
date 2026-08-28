@@ -185,8 +185,8 @@ export function applyDynamicWatermark(input, opts = {}) {
   const filter = filterParts.join(";");
 
   const cmd = skipTitleBar
-    ? `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`
-    : `/usr/bin/ffmpeg -y -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -c:a aac -b:a 96k -movflags +faststart "${output}"`;
+    ? `/usr/bin/ffmpeg -y -threads 2 -i "${input}" -i "${watermarkPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -pix_fmt yuv420p -c:a aac -b:a 96k -movflags +faststart "${output}"`
+    : `/usr/bin/ffmpeg -y -threads 2 -i "${input}" -i "${watermarkPath}" -i "${logoPath}" -filter_complex "${filter}" -c:v libx264 -crf ${crf} -preset fast -pix_fmt yuv420p -c:a aac -b:a 96k -movflags +faststart "${output}"`;
 
   if (opts.dryRun) {
     console.log("[dryRun] " + cmd);

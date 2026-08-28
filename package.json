@@ -12,7 +12,8 @@
     "lint": "echo 'no linter configured'"
   },
   "dependencies": {
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "playwright": "^1.62.1"
   },
   "engines": {
     "node": ">=18"

@@ -91,6 +91,7 @@ export async function createFacebookPost({ content, mediaUrls = [], publishNow =
     platforms: [{ platform: "facebook", accountId: config.facebookAccountId }],
     publishNow,
     mediaUrls,
+    mediaItems: mediaUrls.map((url) => ({ type: "video", url })),
   };
   const res = await fetch(`${config.zernioBaseUrl}/posts`, {
     method: "POST",

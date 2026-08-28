@@ -99,23 +99,94 @@ export const SAFE_COUNTRY_TOURNAMENTS = ["Euro","Copa America","World Cup Qualif
 // WC Finals are banned; filtered finals exclude World Cup
 const SAFE_FINALS = NOTABLE_FINALS.filter(f => f.tournament !== "World Cup");
 
-export function pickRandomClubOrCountry(){ const ratio=parseFloat(process.env.CLUB_COUNTRY_RATIO||"0.8"); const isClub=Math.random()<ratio; const game=isClub?pickRandomClubGame():pickRandomCountryGame(); return {...game, category:isClub?"club":"country"}; }
+export const STAGES = ["Group Stage","Round of 16","Quarter-Final","Semi-Final","Final","Regular Season"];
+export const STAGE_WEIGHTS = { "Group Stage": 0.25, "Round of 16": 0.20, "Quarter-Final": 0.15, "Semi-Final": 0.15, "Final": 0.10, "Regular Season": 0.15 };
+export function pickRandomStage(){
+  const r=Math.random();
+  let acc=0;
+  for(const s of STAGES){ acc+=STAGE_WEIGHTS[s]; if(r < acc) return s; }
+  return STAGES[STAGES.length-1];
+}
+export function stageToQuerySuffix(stage){
+  const map={
+    "Group Stage": "group stage",
+    "Round of 16": "round of 16",
+    "Quarter-Final": "quarter final",
+    "Semi-Final": "semi final",
+    "Final": "final",
+    "Regular Season": "" // no suffix — plain league match
+  };
+  return map[stage]||"";
+}
+export function pickRandomClubOrCountry(){ const ratio=parseFloat(process.env.CLUB_COUNTRY_RATIO||"0.8"); const isClub=Math.random()<ratio; const game=isClub?pickRandomClubGame():pickRandomCountryGame(); return {...game, category:isClub?"club":"country", stage: pickRandomStage()}; }
 export function getRandomHistoricalPick(){
+  const stage = pickRandomStage();
+  const suffix = stageToQuerySuffix(stage);
   const r=Math.random();
   if(r < 0.80){
-    if(r < 0.20 && SAFE_FINALS.length){
+    // club path — 80% weight
+    // Final only if stage is Final; otherwise regular/league stage match
+    if(stage === "Final" && SAFE_FINALS.length && Math.random() < 0.5){
       const f=SAFE_FINALS[Math.floor(Math.random()*SAFE_FINALS.length)];
-      return {tournament:f.tournament,year:f.year,match:f,title:f.title,query:`${f.tournament} ${f.year} final ${f.homeTeam} vs ${f.awayTeam} highlights`,category:"final", safe:true};
+      // SAFE_FINALS excludes World Cup, so safe
+      return {tournament:f.tournament,year:f.year,match:{...f, stage},title:f.title,query:`${f.tournament} ${f.year} final ${f.homeTeam} vs ${f.awayTeam} highlights`,category:"final", stage, safe:true, stageSuffix: suffix};
     }
-    const g=pickRandomClubGame(); return {tournament:g.tournament,year:g.year,match:g,title:g.title,query:`${g.tournament} ${g.year} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"club", safe:true};
+    let g=pickRandomClubGame();
+    // League-aware stage: domestic leagues have no knockout rounds — force Regular Season
+    const LEAGUE_TOURNAMENTS = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1"];
+    let effectiveStage = stage;
+    let effectiveSuffix = suffix;
+    if (LEAGUE_TOURNAMENTS.includes(g.tournament) && stage !== "Regular Season" && stage !== "Final") {
+      effectiveStage = "Regular Season";
+      effectiveSuffix = "";
+    }
+    const suffixPart = effectiveSuffix ? ` ${effectiveSuffix}` : "";
+    // override title stage for diversity
+    const titleWithStage = effectiveSuffix && effectiveStage !== "Regular Season" ? `${g.tournament} ${g.year} ${effectiveSuffix} — ${g.homeTeam} vs ${g.awayTeam}` : g.title;
+    return {tournament:g.tournament,year:g.year,match:{...g, stage: effectiveStage},title:titleWithStage,query:`${g.tournament} ${g.year}${suffixPart} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"club", stage: effectiveStage, safe:true, stageSuffix: effectiveSuffix};
   }
+  // country path — 20% weight
   let g=pickRandomCountryGame();
   let attempts=0;
   while(g.tournament==="World Cup" && /final/i.test(g.title) && attempts<10){ g=pickRandomCountryGame(); attempts++; }
-  return {tournament:g.tournament,year:g.year,match:g,title:g.title,query:`${g.tournament} ${g.year} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", safe: g.tournament!=="World Cup" || !/final/i.test(g.title)};}
+  // enforce stage diversity: if original title is Final but random stage is not, regenerate suffix
+  const suffixPart2 = suffix ? ` ${suffix}` : "";
+  let titleWithStage2 = g.title;
+  if(suffix && stage !== "Regular Season"){
+    // replace Final in title if present, else inject stage
+    if(/final/i.test(titleWithStage2) && stage !== "Final"){
+      titleWithStage2 = `${g.tournament} ${g.year} ${suffix} — ${g.homeTeam} vs ${g.awayTeam}`;
+    } else if(!/final|group|round|quarter|semi/i.test(titleWithStage2)){
+      titleWithStage2 = `${g.tournament} ${g.year} ${suffix} — ${g.homeTeam} vs ${g.awayTeam}`;
+    }
+  }
+  // World Cup Final banned regardless of stage
+  const isBannedWC = g.tournament==="World Cup" && /final/i.test(titleWithStage2);
+  if(isBannedWC){
+    // fallback to club game with same stage
+    const fallback=pickRandomClubGame();
+    const sfx = suffix ? ` ${suffix}` : "";
+    return {tournament:fallback.tournament,year:fallback.year,match:{...fallback, stage},title: suffix && stage!=="Regular Season" ? `${fallback.tournament} ${fallback.year} ${suffix} — ${fallback.homeTeam} vs ${fallback.awayTeam}` : fallback.title,query:`${fallback.tournament} ${fallback.year}${sfx} ${fallback.homeTeam} vs ${fallback.awayTeam} highlights`,category:"club", stage, safe:true, stageSuffix: suffix};
+  }
+  return {tournament:g.tournament,year:g.year,match:{...g, stage},title:titleWithStage2,query:`${g.tournament} ${g.year}${suffixPart2} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", stage, safe: g.tournament!=="World Cup" || !/final/i.test(titleWithStage2), stageSuffix: suffix};}
 export function getDiverseBatch(n=6){
   const seen=new Set(); const out=[]; let attempts=0;
-  while(out.length<n && attempts<100){ attempts++; const p=getRandomHistoricalPick(); const key=`${p.tournament}-${p.year}-${p.match.homeTeam}-${p.match.awayTeam}`; if(seen.has(key)) continue; seen.add(key); out.push(p); }
+  const stageCounts={};
+  while(out.length<n && attempts<150){
+    attempts++;
+    const p=getRandomHistoricalPick();
+    const key=`${p.tournament}-${p.year}-${p.match.homeTeam}-${p.match.awayTeam}-${p.stage}`;
+    if(seen.has(key)) continue;
+    // enforce stage diversity: don't allow >40% same stage in batch
+    const maxSame = Math.ceil(n*0.4);
+    if((stageCounts[p.stage]||0) >= maxSame) {
+      // try to pick different stage — re-roll once
+      if(attempts < 100) continue;
+    }
+    seen.add(key);
+    stageCounts[p.stage]=(stageCounts[p.stage]||0)+1;
+    out.push(p);
+  }
   return out;
 }
 export function finalToHighlight(final,videoUrl=""){

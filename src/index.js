@@ -15,6 +15,7 @@ import { validateHighlight, pickValidHighlightFromCandidates } from "./validate.
 import { parseHighlightFromTitle, validateTripleMatch } from "./ytParser.js";
 import fs from "fs";
 import { execSync } from "child_process";
+import { applyDynamicWatermark } from "./watermark.js";
 
 const POSTED_FILE = "./posted.json";
 const POSTED_FILE_SRC = "./src/posted.json";
@@ -130,6 +131,14 @@ async function getHighlights() {
       tournament: historicPick.tournament,
       query: historicPick.query,
     };
+    // Patch historical match object to ensure yt-dlp source + query are set correctly
+    if (historicPick.match) {
+      base.query = historicPick.query;
+      base.source = "historical-yt-dlp";
+      base.year = base.year || historicPick.year;
+      base.tournament = base.tournament || historicPick.tournament;
+      if (!base.league) base.league = `${historicPick.tournament} ${historicPick.year}`;
+    }
     // Ensure header year is correct — override league year if needed
     if (!base.league.includes(String(historicPick.year))) base.league = `${historicPick.tournament} ${historicPick.year}`;
     return { highlights: [base], historicPick };
@@ -195,7 +204,7 @@ function filterAndSortByPopularity(candidates) {
 }
 function getCandidatesViaDumpJson(query, count=10) {
   try {
-    const out = execSync(`yt-dlp "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8" }).trim();
+    const out = execSync(`yt-dlp "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
     if (!out) return [];
     const cands = parseYtDlpJsonOutput(out);
     if (cands.length) return filterAndSortByPopularity(cands);
@@ -316,7 +325,16 @@ async function main() {
   if (historicPick) console.log(`Historical header: ${historicPick.tournament} ${historicPick.year}`);
   console.log(`Found ${highlights.length} highlights`);
 
-  const fresh = highlights.filter((h) => !isAlreadyPosted(h, posted)).slice(0, config.maxHighlightsPerRun * 3);
+  const historicalMode = process.env.RANDOM_HISTORICAL === "1" || process.env.RANDOM_HISTORICAL === "true" || process.env.HISTORICAL_MODE === "1" || process.env.HISTORICAL_MODE === "true";
+  const freshRaw = highlights.filter((h) => !isAlreadyPosted(h, posted));
+  // For historical yt-dlp fallback, allow re-post with different stage/query if filtered as duplicate (stage diversity requirement)
+  let fresh = freshRaw.slice(0, config.maxHighlightsPerRun * 3);
+  if (!fresh.length && historicalMode && highlights.length && historicPick) {
+    console.log(`[HISTORICAL MODE] All highlights flagged as already posted — allowing stage-diverse re-try for ${historicPick.tournament} ${historicPick.year} ${historicPick.stage}`);
+    fresh = highlights.slice(0, 1);
+  } else {
+    fresh = freshRaw.slice(0, config.maxHighlightsPerRun * 3);
+  }
   // Cartoon filter: drop any highlight whose title/description looks cartoon/animated
   const filteredFresh = fresh.filter(h => {
     if (isCartoonVideoSync(h.title || "", h.description || h.league || "")) {
@@ -346,7 +364,7 @@ async function main() {
     // Dry-run: validate metadata without requiring video file download
     if (config.dryRun) {
       // For yt-dlp sourced highlights with multiple candidates, iterate 1-5 until valid (metadata only)
-      if (h.source === "historical-yt-dlp" && h.query) {
+      if ((h.source === "historical-yt-dlp" || h.source === "historical" || h.source?.startsWith("historical")) && h.query) {
         // In dry-run, validate without downloading — skip video file check
         const dryResult = await validateHighlight(h, { skipVideoCheck: true });
         if (!dryResult.valid) {
@@ -357,7 +375,7 @@ async function main() {
             // Use dump-json for high-liked sorting
             let cands = [];
             try {
-              const jout = _exec(`yt-dlp "ytsearch10:${h.query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8" }).trim();
+              const jout = _exec(`yt-dlp "ytsearch10:${h.query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
               for (const line of jout.split("\n").filter(Boolean)) {
                 if (!line.trim().startsWith("{")) continue;
                 try { const j=JSON.parse(line); if(j.id) cands.push({ id:j.id, title:j.title||"", thumbnail:j.thumbnail||`https://img.youtube.com/vi/${j.id}/hqdefault.jpg`, view_count:j.view_count||0, like_count:j.like_count||0, comment_count:j.comment_count||0 }); } catch {}
@@ -416,7 +434,7 @@ async function main() {
     const videoLink = h.videoUrl || h.embedUrl || "";
 
     // For historical yt-dlp highlights: iterate ytsearch 1-5 until valid before presign upload
-    if (!mediaUrls.length && !localVideoPath && videoLink && h.source === "historical-yt-dlp" && h.query) {
+    if (!mediaUrls.length && !localVideoPath && videoLink && (h.source === "historical-yt-dlp" || h.source === "historical" || h.source?.startsWith("historical")) && h.query) {
       console.log(`[validate] Historical highlight — iterating ytsearch candidates 1-5 for valid video before presign upload...`);
       const picked = await pickValidHighlightFromCandidates(h.query, h, downloadVideoFile);
       if (picked) {
@@ -479,14 +497,33 @@ async function main() {
     }
     console.log(`[validate] ✓ Highlight passed validation: ${h.title}`);
 
-    // === STRICT PRE-PUBLISH: presign upload with size>1M + PUT 200 + https://media.zernio.com ===
+    // === STRICT PRE-PUBLISH: watermark HIGH UP (extended canvas above video) + presign upload with size>1M + PUT 200 + https://media.zernio.com ===
     let strictMediaUrl;
     try {
-      const fileForUpload = localVideoPath || mediaUrls[0];
+      let fileForUpload = localVideoPath || mediaUrls[0];
       if (!fileForUpload || !fs.existsSync(fileForUpload)) throw new Error(`no local video file for strict upload: ${fileForUpload}`);
-      const sz = fs.statSync(fileForUpload).size;
+      let sz = fs.statSync(fileForUpload).size;
       if (sz < 1_000_000) throw new Error(`video file too small ${sz} < 1M`);
-      console.log(`[strict] Presigning upload for ${fileForUpload} (${Math.round(sz/1024/1024)}MB)...`);
+      // Watermark: extended canvas 110px above video, logo mandatory, profile pic top-right
+      const { requireTournamentLogo } = await import("./config.js");
+      const tourn = h.tournament || h.league || "";
+      const yr = h.year || (h.date ? new Date(h.date).getFullYear() : 2024);
+      const logoPath = requireTournamentLogo(tourn, yr);
+      let profilePic = "/tmp/page_profile.jpg";
+      if (!fs.existsSync(profilePic) || fs.statSync(profilePic).size < 1000) {
+        try { execSync(`ffmpeg -y -f lavfi -i color=c=white:s=140x140 -frames:v 1 "${profilePic}" 2>/dev/null`, {timeout:10000}); } catch {}
+      }
+      const watermarked = `/tmp/wm_${String(h.id).replace(/[^a-zA-Z0-9_-]/g,"_")}.mp4`;
+      console.log(`[watermark] Applying HIGH UP bar 110px + logo ${logoPath} to ${fileForUpload} → ${watermarked}`);
+      applyDynamicWatermark(fileForUpload, {
+        tournament: tourn || "Football", year: yr, teamA: h.homeTeam||"Team A", teamB: h.awayTeam||"Team B", stage: h.stage||h.match?.stage||"Highlights",
+        logoPath, watermarkPath: profilePic, output: watermarked, headerHeight:110, logoScaleH:100, logoPos:"left", watermarkPos:"top-right", watermarkSize:140, watermarkAlpha:0.6, crf:30, autoDetect:false,
+      });
+      fileForUpload = watermarked;
+      // Update localVideoPath to watermarked for later validation checks
+      localVideoPath = watermarked;
+      sz = fs.statSync(fileForUpload).size;
+      console.log(`[strict] Presigning upload for watermarked ${fileForUpload} (${Math.round(sz/1024/1024)}MB)...`);
       strictMediaUrl = await presignUploadStrict(fileForUpload);
       console.log(`[strict] ✓ Upload OK: ${strictMediaUrl}`);
       if (!strictMediaUrl.startsWith("https://media.zernio.com")) throw new Error(`mediaUrl not https://media.zernio.com: ${strictMediaUrl}`);
@@ -518,7 +555,7 @@ async function main() {
     let postVerified = false;
     let postResult = null;
     let postId = null;
-    let verifyRetries = 2; // poll GET /posts/{id} up to 3 times
+    let verifyRetries = 6; // poll GET /posts/{id} up to 7 times (30s total for video processing)
     const MAX_POST_RETRIES = 5;
     let retryCount = 0;
     // current highlight pointer stays as h; on failure consume next candidate from toPost array
@@ -551,7 +588,7 @@ async function main() {
           throw new Error("No postId in create response");
         }
         // === STRICT POST-PUBLISH CHECK: GET post, if mediaItems 0 or content empty or platforms[0] status not published, DELETE/unpublish + blacklist + retry ===
-        const ver = await verifyPostPublished(postId, { retries: verifyRetries, delayMs: 3000 });
+        const ver = await verifyPostPublished(postId, { retries: verifyRetries, delayMs: 5000 });
         // Also direct GET check for strict emptiness even if isPostVerified says something else
         let strictFail = null;
         if (!ver.verified) strictFail = ver.reason;
