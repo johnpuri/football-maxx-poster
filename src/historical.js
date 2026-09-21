@@ -136,6 +136,29 @@ export function effectiveStageFor(tournament, year, stage){
   return { stage, suffix: stageToQuerySuffix(stage) };
 }
 export function getRandomHistoricalPick(){
+  // Forced pick (manual check runs): FORCED_TOURNAMENT / FORCED_YEAR / FORCED_STAGE
+  const forcedTourn = (process.env.FORCED_TOURNAMENT || "").toLowerCase();
+  const forcedYear = parseInt(process.env.FORCED_YEAR || "0", 10);
+  const forcedStage = process.env.FORCED_STAGE || "";
+  if (forcedTourn) {
+    const pool = [...CLUB_GAMES, ...COUNTRY_GAMES].filter(g =>
+      g.tournament.toLowerCase().includes(forcedTourn) && (!forcedYear || g.year === forcedYear));
+    if (pool.length) {
+      const g = pool[Math.floor(Math.random() * pool.length)];
+      let st = forcedStage || "Group Stage";
+      const eff = effectiveStageFor(g.tournament, g.year, st);
+      st = eff.stage;
+      let title = `${g.tournament} ${g.year} ${eff.suffix} — ${g.homeTeam} vs ${g.awayTeam}`;
+      if ((g.tournament === "Euro" || g.tournament === "Copa America") && /final/i.test(title)) {
+        title = `${g.tournament} ${g.year} Semi-Final — ${g.homeTeam} vs ${g.awayTeam}`;
+        st = "Semi-Final";
+      }
+      return { tournament: g.tournament, year: g.year, match: { ...g, stage: st }, title,
+        query: `${g.tournament} ${g.year}${eff.suffix ? " " + eff.suffix : ""} ${g.homeTeam} vs ${g.awayTeam} highlights`,
+        category: "forced", stage: st, safe: true, stageSuffix: eff.suffix };
+    }
+    console.warn(`[FORCED] No match for tournament="${forcedTourn}" year=${forcedYear} — falling back to random`);
+  }
   const stage = pickRandomStage();
   const suffix = stageToQuerySuffix(stage);
   const r=Math.random();
@@ -144,7 +167,7 @@ export function getRandomHistoricalPick(){
     // Final only if stage is Final; otherwise regular/league stage match
     if(stage === "Final" && SAFE_FINALS.length && Math.random() < 0.5){
       const f=SAFE_FINALS[Math.floor(Math.random()*SAFE_FINALS.length)];
-      // SAFE_FINALS excludes World Cup, so safe
+      // SAFE_FINALS excludes World Cup / Euro / Copa America (validator-banned), so safe
       return {tournament:f.tournament,year:f.year,match:{...f, stage},title:f.title,query:`${f.tournament} ${f.year} final ${f.homeTeam} vs ${f.awayTeam} highlights`,category:"final", stage, safe:true, stageSuffix: suffix};
     }
     let g=pickRandomClubGame();
@@ -196,7 +219,11 @@ export function getRandomHistoricalPick(){
     const sfx = effSuffix ? ` ${effSuffix}` : "";
     return {tournament:fallback.tournament,year:fallback.year,match:{...fallback, stage: effStage},title: effSuffix && effStage!=="Regular Season" ? `${fallback.tournament} ${fallback.year} ${effSuffix} — ${fallback.homeTeam} vs ${fallback.awayTeam}` : fallback.title,query:`${fallback.tournament} ${fallback.year}${sfx} ${fallback.homeTeam} vs ${fallback.awayTeam} highlights`,category:"club", stage: effStage, safe:true, stageSuffix: effSuffix};
   }
-  return {tournament:g.tournament,year:g.year,match:{...g, stage: effStage},title:titleWithStage2,query:`${g.tournament} ${g.year}${suffixPart2} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", stage: effStage, safe: g.tournament!=="World Cup" || !/final/i.test(titleWithStage2), stageSuffix: effSuffix};}
+  // Align query stage with the title's stage (a "final" query for a semi game returns wrong videos)
+  const titleStageMatch = titleWithStage2.match(/semi[\s-]?final|quarter[\s-]?final|round of 16|group stage|regular season|\bfinal\b/i);
+  const querySuffix = titleStageMatch ? titleStageMatch[0].toLowerCase().replace(/-/, " ") : effSuffix;
+  const querySuffixPart = querySuffix ? ` ${querySuffix}` : "";
+  return {tournament:g.tournament,year:g.year,match:{...g, stage: effStage},title:titleWithStage2,query:`${g.tournament} ${g.year}${querySuffixPart} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", stage: effStage, safe: g.tournament!=="World Cup" || !/final/i.test(titleWithStage2), stageSuffix: effSuffix};}
 export function getDiverseBatch(n=6){
   const seen=new Set(); const out=[]; let attempts=0;
   const stageCounts={};

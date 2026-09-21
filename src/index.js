@@ -475,7 +475,8 @@ async function main() {
       console.log(`[HISTORICAL MODE] Re-rolled fresh pick: ${reroll.tournament} ${reroll.year} — ${reroll.title}`);
       historicPick = reroll;
       const base = reroll.match ? finalToHighlight(reroll.match, highlights[0]?.videoUrl || highlights[0]?.embedUrl || "") : highlights[0];
-      fresh = [{ ...base, query: reroll.query, year: reroll.year, tournament: reroll.tournament, source: "historical-yt-dlp" }];
+      // use the pick's stage-correct title (match.title may carry a stale Final label)
+      fresh = [{ ...base, title: reroll.title || base.title, query: reroll.query, year: reroll.year, tournament: reroll.tournament, source: "historical-yt-dlp" }];
     } else {
       console.log(`[HISTORICAL MODE] No fresh match found after 10 re-rolls — skipping run (no duplicate).`);
       fresh = [];
