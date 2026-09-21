@@ -311,8 +311,16 @@ function getCandidatesViaDumpJson(query, count=10) {
   let lastErr = "";
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      // 2>&1 keeps ERROR lines visible; the JSON parser skips non-{ lines
-      const out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings --ignore-errors --no-abort-on-error 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      // 2>&1 keeps ERROR lines visible; the JSON parser skips non-{ lines.
+      // If yt-dlp exits non-zero, its stdout still holds valid results — use it.
+      let out = "";
+      try {
+        out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings --ignore-errors --no-abort-on-error 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      } catch (e) {
+        out = ((e.stdout || "") + "\n" + (e.stderr || "")).trim();
+        if (!out) throw e;
+        console.log(`[yt-dlp] search exited non-zero but yielded output — parsing partial results`);
+      }
       const cands = parseYtDlpJsonOutput(out);
       if (cands.length) {
         if (attempt > 1) console.log(`[yt-dlp] dump-json succeeded on attempt ${attempt}`);

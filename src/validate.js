@@ -474,7 +474,13 @@ export async function pickValidHighlightFromCandidates(query, originalHighlight,
   // Try dump-json first (10 candidates sorted by popularity), 3 attempts
   for (let attempt = 1; attempt <= 3 && !candidates.length; attempt++) {
     try {
-      let out = execSync(`yt-dlp ${cookiesFlag} "ytsearch10:${query}" --dump-json --no-warnings --ignore-errors --no-abort-on-error 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      let out = "";
+      try {
+        out = execSync(`yt-dlp ${cookiesFlag} "ytsearch10:${query}" --dump-json --no-warnings --ignore-errors --no-abort-on-error 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      } catch (e) {
+        out = ((e.stdout || "") + "\n" + (e.stderr || "")).trim();
+        if (out) console.log(`[validate] search exited non-zero but yielded output — parsing partial results`);
+      }
       if (out) candidates = parseDumpJson(out);
     } catch (e) {
       console.warn(`[validate] dump-json attempt ${attempt}/3 failed: ${(e.stdout || e.message || "").toString().slice(0,150)}`);
