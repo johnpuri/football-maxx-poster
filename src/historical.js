@@ -79,7 +79,7 @@ export const COUNTRY_GAMES = [
   { tournament: "Euro", year: 2016, homeTeam: "Iceland", awayTeam: "England", title: "Euro 2016 — Iceland vs England 2-1", city: "Nice" },
   { tournament: "World Cup", year: 2018, homeTeam: "Spain", awayTeam: "Portugal", title: "World Cup 2018 — Spain vs Portugal 3-3", city: "Sochi" },
   { tournament: "Copa America", year: 2019, homeTeam: "Brazil", awayTeam: "Peru", title: "Copa America 2019 Final — Brazil vs Peru", city: "Rio" },
-  { tournament: "Euro", year: 2021, homeTeam: "Italy", awayTeam: "England", title: "Euro 2020 Final — Italy vs England", city: "London" },
+  { tournament: "Euro", year: 2020, homeTeam: "Italy", awayTeam: "England", title: "Euro 2020 Final — Italy vs England", city: "London" },
   { tournament: "World Cup", year: 2022, homeTeam: "Morocco", awayTeam: "Portugal", title: "World Cup 2022 Quarter — Morocco vs Portugal 1-0", city: "Doha" },
   { tournament: "World Cup", year: 2014, homeTeam: "Netherlands", awayTeam: "Spain", title: "World Cup 2014 — Netherlands vs Spain 5-1", city: "Salvador" },
   { tournament: "Copa America", year: 2021, homeTeam: "Argentina", awayTeam: "Brazil", title: "Copa America 2021 Final — Argentina vs Brazil", city: "Rio" },
@@ -96,8 +96,10 @@ export function pickRandomCountryGame(){ return COUNTRY_GAMES[Math.floor(Math.ra
 // SAFE CONTENT LISTS — exported for validator awareness
 export const SAFE_CLUB_TOURNAMENTS = ["Premier League","La Liga","Serie A","Bundesliga","Ligue 1","Champions League","Europa League","FA Cup"];
 export const SAFE_COUNTRY_TOURNAMENTS = ["Euro","Copa America","World Cup Qualifier"];
-// WC Finals are banned; filtered finals exclude World Cup
-const SAFE_FINALS = NOTABLE_FINALS.filter(f => f.tournament !== "World Cup");
+// WC Finals are banned; Euro/Copa finals are banned by the validator too (Rule 5b) —
+// exclude them here so the picker never wastes a run on a pick that validation rejects.
+// (Club/UCL finals from fan edits pass validation, same as Bundesliga.)
+const SAFE_FINALS = NOTABLE_FINALS.filter(f => f.tournament !== "World Cup" && f.tournament !== "Euro" && f.tournament !== "Copa America");
 
 export const STAGES = ["Group Stage","Round of 16","Quarter-Final","Semi-Final","Final","Regular Season"];
 export const STAGE_WEIGHTS = { "Group Stage": 0.25, "Round of 16": 0.20, "Quarter-Final": 0.15, "Semi-Final": 0.15, "Final": 0.10, "Regular Season": 0.15 };
@@ -119,6 +121,20 @@ export function stageToQuerySuffix(stage){
   return map[stage]||"";
 }
 export function pickRandomClubOrCountry(){ const ratio=parseFloat(process.env.CLUB_COUNTRY_RATIO||"0.8"); const isClub=Math.random()<ratio; const game=isClub?pickRandomClubGame():pickRandomCountryGame(); return {...game, category:isClub?"club":"country", stage: pickRandomStage()}; }
+// Stage validity per tournament — same rule for every competition (Bundesliga/UCL style):
+// Euro 2000–2012 was a 16-team tournament (group → quarter-final, NO Round of 16; R16 starts Euro 2016).
+// Copa America has group → quarter-final, no Round of 16. World Cup has R16 throughout.
+export function effectiveStageFor(tournament, year, stage){
+  // World Cup Qualifiers have no knockout rounds — group/playoff only
+  if (tournament === "World Cup Qualifier" && stage !== "Group Stage" && stage !== "Regular Season") {
+    return { stage: "Group Stage", suffix: "group stage" };
+  }
+  if (stage === "Round of 16") {
+    if (tournament === "Copa America") return { stage: "Quarter-Final", suffix: "quarter final" };
+    if (tournament === "Euro" && year < 2016) return { stage: "Quarter-Final", suffix: "quarter final" };
+  }
+  return { stage, suffix: stageToQuerySuffix(stage) };
+}
 export function getRandomHistoricalPick(){
   const stage = pickRandomStage();
   const suffix = stageToQuerySuffix(stage);
@@ -149,15 +165,27 @@ export function getRandomHistoricalPick(){
   let g=pickRandomCountryGame();
   let attempts=0;
   while(g.tournament==="World Cup" && /final/i.test(g.title) && attempts<10){ g=pickRandomCountryGame(); attempts++; }
+  // Euro/Copa finals are banned by the validator (Rule 5b) — rewrite to a
+  // knockout semi like the UCL path instead of wasting the run (same way as Bundesliga).
+  // Covers both Final-titled games AND stage=Final rolled onto a group game.
+  const eff0 = effectiveStageFor(g.tournament, g.year, stage);
+  let useStage = stage;
+  if ((g.tournament === "Euro" || g.tournament === "Copa America") && (/final/i.test(g.title) || eff0.stage === "Final")) {
+    g = { ...g, title: `${g.tournament} ${g.year} Semi-Final — ${g.homeTeam} vs ${g.awayTeam}` };
+    useStage = "Semi-Final";
+  }
+  // enforce stage validity for this tournament (Euro pre-2016 / Copa have no R16 — same as club path)
+  const eff = effectiveStageFor(g.tournament, g.year, useStage);
+  const effStage = eff.stage, effSuffix = eff.suffix;
   // enforce stage diversity: if original title is Final but random stage is not, regenerate suffix
-  const suffixPart2 = suffix ? ` ${suffix}` : "";
+  const suffixPart2 = effSuffix ? ` ${effSuffix}` : "";
   let titleWithStage2 = g.title;
-  if(suffix && stage !== "Regular Season"){
+  if(effSuffix && effStage !== "Regular Season"){
     // replace Final in title if present, else inject stage
-    if(/final/i.test(titleWithStage2) && stage !== "Final"){
-      titleWithStage2 = `${g.tournament} ${g.year} ${suffix} — ${g.homeTeam} vs ${g.awayTeam}`;
+    if(/final/i.test(titleWithStage2) && effStage !== "Final"){
+      titleWithStage2 = `${g.tournament} ${g.year} ${effSuffix} — ${g.homeTeam} vs ${g.awayTeam}`;
     } else if(!/final|group|round|quarter|semi/i.test(titleWithStage2)){
-      titleWithStage2 = `${g.tournament} ${g.year} ${suffix} — ${g.homeTeam} vs ${g.awayTeam}`;
+      titleWithStage2 = `${g.tournament} ${g.year} ${effSuffix} — ${g.homeTeam} vs ${g.awayTeam}`;
     }
   }
   // World Cup Final banned regardless of stage
@@ -165,10 +193,10 @@ export function getRandomHistoricalPick(){
   if(isBannedWC){
     // fallback to club game with same stage
     const fallback=pickRandomClubGame();
-    const sfx = suffix ? ` ${suffix}` : "";
-    return {tournament:fallback.tournament,year:fallback.year,match:{...fallback, stage},title: suffix && stage!=="Regular Season" ? `${fallback.tournament} ${fallback.year} ${suffix} — ${fallback.homeTeam} vs ${fallback.awayTeam}` : fallback.title,query:`${fallback.tournament} ${fallback.year}${sfx} ${fallback.homeTeam} vs ${fallback.awayTeam} highlights`,category:"club", stage, safe:true, stageSuffix: suffix};
+    const sfx = effSuffix ? ` ${effSuffix}` : "";
+    return {tournament:fallback.tournament,year:fallback.year,match:{...fallback, stage: effStage},title: effSuffix && effStage!=="Regular Season" ? `${fallback.tournament} ${fallback.year} ${effSuffix} — ${fallback.homeTeam} vs ${fallback.awayTeam}` : fallback.title,query:`${fallback.tournament} ${fallback.year}${sfx} ${fallback.homeTeam} vs ${fallback.awayTeam} highlights`,category:"club", stage: effStage, safe:true, stageSuffix: effSuffix};
   }
-  return {tournament:g.tournament,year:g.year,match:{...g, stage},title:titleWithStage2,query:`${g.tournament} ${g.year}${suffixPart2} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", stage, safe: g.tournament!=="World Cup" || !/final/i.test(titleWithStage2), stageSuffix: suffix};}
+  return {tournament:g.tournament,year:g.year,match:{...g, stage: effStage},title:titleWithStage2,query:`${g.tournament} ${g.year}${suffixPart2} ${g.homeTeam} vs ${g.awayTeam} highlights`,category:"country", stage: effStage, safe: g.tournament!=="World Cup" || !/final/i.test(titleWithStage2), stageSuffix: effSuffix};}
 export function getDiverseBatch(n=6){
   const seen=new Set(); const out=[]; let attempts=0;
   const stageCounts={};

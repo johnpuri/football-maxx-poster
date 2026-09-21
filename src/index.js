@@ -14,8 +14,127 @@ import { isFifaHighRisk } from "./validate.js";
 import { validateHighlight, pickValidHighlightFromCandidates } from "./validate.js";
 import { parseHighlightFromTitle, validateTripleMatch } from "./ytParser.js";
 import fs from "fs";
+import path from "path";
 import { execSync } from "child_process";
 import { applyDynamicWatermark } from "./watermark.js";
+
+export function getYtDlpCookiesFlag() {
+  const cookiePath = "/tmp/youtube_cookies.txt";
+  if (fs.existsSync(cookiePath) && fs.statSync(cookiePath).size > 100) {
+    return `--cookies "${cookiePath}"`;
+  }
+  return "";
+}
+
+export function refreshCookiesIfNeeded(force = false) {
+  const cookiePath = "/tmp/youtube_cookies.txt";
+  let needsRefresh = force || !fs.existsSync(cookiePath);
+  if (!needsRefresh) {
+    try {
+      const st = fs.statSync(cookiePath);
+      if (st.size < 100 || (Date.now() - st.mtimeMs > 6 * 3600 * 1000)) {
+        needsRefresh = true;
+      }
+    } catch {
+      needsRefresh = true;
+    }
+  }
+  if (needsRefresh) {
+    try {
+      console.log("[cookies] Refreshing /tmp/youtube_cookies.txt via get_cookies.mjs...");
+      execSync("node get_cookies.mjs", { timeout: 45000, cwd: "/home/john/dev/football-maxx-poster" });
+    } catch (e) {
+      console.warn("[cookies] Failed to refresh cookies:", e.message);
+    }
+  }
+  return getYtDlpCookiesFlag();
+}
+
+export function pickCachedFallbackReel(postedSet = new Set()) {
+  let files = [];
+  try {
+    files = fs.readdirSync("/tmp")
+      .filter(f => f.startsWith("wm_") && f.endsWith(".mp4"))
+      .map(f => path.join("/tmp", f))
+      .filter(p => {
+        try { return fs.statSync(p).size > 1_000_000; } catch { return false; }
+      });
+  } catch {}
+  if (!files.length) return null;
+
+  const candidates = [];
+  const allParsed = [];
+  for (const fp of files) {
+    const base = path.basename(fp);
+    const m = base.replace(/^wm_historic-/, "").replace(/\.mp4$/, "").match(/^(.+)-(\d{4})-(.+)-vs-(.+)$/);
+    if (!m) continue;
+    const tc = s => s.split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+    const tournament = tc(m[1]);
+    const year = parseInt(m[2], 10);
+    const homeTeam = tc(m[3]);
+    const awayTeam = tc(m[4]);
+    const highlight = {
+      id: `historic-${m[1]}-${year}-${m[3]}-vs-${m[4]}`,
+      title: `${tournament} ${year} — ${homeTeam} vs ${awayTeam}`,
+      tournament,
+      year,
+      league: `${tournament} ${year}`,
+      homeTeam,
+      awayTeam,
+      stage: "Highlights",
+      date: `${year}-07-01`,
+      isCachedWm: true,
+      source: "cached-wm-fallback",
+    };
+    allParsed.push({ path: fp, highlight, base });
+    if (postedSet.has(base) || postedSet.has(fp) || isAlreadyPosted(highlight, postedSet)) {
+      continue;
+    }
+    candidates.push({ path: fp, highlight, base });
+  }
+
+  // ffprobe gate: cached file must be a valid video, 60-250s (same bar as fresh downloads)
+  const validParsed = [];
+  for (const cand of allParsed) {
+    try {
+      const dur = execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${cand.path}" 2>&1`, { encoding: "utf8", timeout: 10000 }).trim();
+      const d = parseFloat(dur);
+      const vs = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=codec_type -of csv=p=0 "${cand.path}" 2>&1`, { encoding: "utf8", timeout: 10000 }).trim();
+      if (vs.includes("video") && d >= 60 && d <= 250) validParsed.push(cand);
+      else console.warn(`[cached fallback] skipping invalid cached file: ${cand.base} (dur=${dur}, stream=${vs})`);
+    } catch { console.warn(`[cached fallback] skipping unreadable cached file: ${cand.base}`); }
+  }
+  const validCandidates = candidates.filter(c => validParsed.includes(c));
+  if (!validCandidates.length) {
+    // NO repost: every valid cached reel already posted → fail clean so cron logs it instead of duplicating
+    console.warn("[cached fallback] All valid cached reels already posted — refusing to repost (no duplicate).");
+    return null;
+  }
+  validCandidates.sort(() => Math.random() - 0.5);
+  return validCandidates[0];
+}
+
+async function deduplicateRecentPosts() {
+  try {
+    const recent = await listPosts(5);
+    const seen = new Map();
+    for (const post of recent) {
+      const mediaUrl = post.mediaItems?.[0]?.url;
+      if (!mediaUrl) continue;
+      const base = mediaUrl.split("/").pop().replace(/^\d+_[a-z0-9]+_/, "");
+      if (seen.has(base)) {
+        const olderId = post._id || post.id;
+        console.log(`[dedup] Duplicate detected for ${base}: unpublishing older post ${olderId}`);
+        const un = await unpublishPost(olderId);
+        console.log(`[dedup] unpublish ${olderId} => ${un.status}`);
+      } else {
+        seen.set(base, post._id || post.id);
+      }
+    }
+  } catch (e) {
+    console.warn(`[dedup] deduplicateRecentPosts failed: ${e.message}`);
+  }
+}
 
 const POSTED_FILE = "./posted.json";
 const POSTED_FILE_SRC = "./src/posted.json";
@@ -34,7 +153,12 @@ function savePosted(set) {
     try { fs.writeFileSync(p, JSON.stringify(arr, null, 2)); } catch {}
   }
 }
-function normalizeTeam(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]/g,""); }
+function normalizeTeam(s){
+  return (s||"").toLowerCase()
+    .replace(/\b(uefa|fifa|euro|european|world|champions|league|cup|copa|america|ucl|epl|laliga|premier|bundesliga|serie|ligue|europa|final|semi|quarter|round|group|stage|regular|season|knockout|playoff|highlights?)\b/g," ")
+    .replace(/(19|20)\d{2}/g," ")
+    .replace(/[^a-z0-9]/g,"");
+}
 export function highlightPostedKeys(h){
   const keys=[];
   if(h.id) keys.push(h.id);
@@ -204,7 +328,15 @@ function filterAndSortByPopularity(candidates) {
 }
 function getCandidatesViaDumpJson(query, count=10) {
   try {
-    const out = execSync(`yt-dlp "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+    let cookiesFlag = refreshCookiesIfNeeded();
+    let out = "";
+    try {
+      out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+    } catch {
+      // Retry once with refreshed cookies
+      cookiesFlag = refreshCookiesIfNeeded(true);
+      out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+    }
     if (!out) return [];
     const cands = parseYtDlpJsonOutput(out);
     if (cands.length) return filterAndSortByPopularity(cands);
@@ -229,8 +361,9 @@ function tryYtDlpSearchFilteredSync(query) {
     return `https://www.youtube.com/watch?v=${sorted[0].id}`;
   }
   // Fallback to old --get-id --get-title path (no view metadata)
+  const cookiesFlag = getYtDlpCookiesFlag();
   try {
-    const out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+    const out = execSync(`yt-dlp ${cookiesFlag} "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
     const lines = out.split("\n").filter(Boolean);
     const candidates = [];
     for (let i = 0; i < lines.length - 1; i += 2) {
@@ -252,7 +385,7 @@ function tryYtDlpSearchFilteredSync(query) {
     if (candidates.length) return `https://www.youtube.com/watch?v=${candidates[0].id}`;
   } catch {}
   try {
-    const id = execSync(`yt-dlp "ytsearch1:${query}" --get-id --no-warnings 2>/dev/null | head -n1`, { timeout: 15000, encoding: "utf8" }).trim();
+    const id = execSync(`yt-dlp ${cookiesFlag} "ytsearch1:${query}" --get-id --no-warnings 2>/dev/null | head -n1`, { timeout: 15000, encoding: "utf8" }).trim();
     if (id && /^[A-Za-z0-9_-]{6,}$/.test(id)) return `https://www.youtube.com/watch?v=${id}`;
   } catch {}
   return "";
@@ -261,9 +394,10 @@ function tryYtDlpSearchFilteredSync(query) {
 async function downloadVideoFile(videoUrl, id) {
   if (!videoUrl || !/^https?:\/\//.test(videoUrl)) return null;
   const outPath = `/tmp/footballmaxx_${String(id).replace(/[^a-zA-Z0-9_-]/g, "_")}.mp4`;
+  const cookiesFlag = refreshCookiesIfNeeded();
   try {
     console.log(`[video] Downloading for reel: ${videoUrl} → ${outPath}`);
-    execSync(`yt-dlp -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b" --merge-output-format mp4 --no-playlist --max-filesize 500M -o "${outPath}" "${videoUrl}" 2>&1 | tail -n 5`, { timeout: 120000, encoding: "utf8" });
+    execSync(`yt-dlp ${cookiesFlag} -f "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4] / bv*+ba/b" --merge-output-format mp4 --no-playlist --max-filesize 500M -o "${outPath}" "${videoUrl}" 2>&1 | tail -n 5`, { timeout: 120000, encoding: "utf8" });
     if (fs.existsSync(outPath) && fs.statSync(outPath).size > 10000) {
       console.log(`[video] Downloaded: ${outPath} (${Math.round(fs.statSync(outPath).size/1024/1024)}MB)`);
       return outPath;
@@ -321,7 +455,7 @@ export async function tryYtDlpSearchFiltered(query) {
 async function main() {
   console.log(`Football Maxx Poster — dryRun=${config.dryRun}`);
   const posted = loadPosted();
-  const { highlights, historicPick } = await getHighlights();
+  let { highlights, historicPick } = await getHighlights();
   if (historicPick) console.log(`Historical header: ${historicPick.tournament} ${historicPick.year}`);
   console.log(`Found ${highlights.length} highlights`);
 
@@ -330,8 +464,22 @@ async function main() {
   // For historical yt-dlp fallback, allow re-post with different stage/query if filtered as duplicate (stage diversity requirement)
   let fresh = freshRaw.slice(0, config.maxHighlightsPerRun * 3);
   if (!fresh.length && historicalMode && highlights.length && historicPick) {
-    console.log(`[HISTORICAL MODE] All highlights flagged as already posted — allowing stage-diverse re-try for ${historicPick.tournament} ${historicPick.year} ${historicPick.stage}`);
-    fresh = highlights.slice(0, 1);
+    // All flagged posted → re-roll NEW picks for different matches (never repost the same one)
+    let reroll = null;
+    for (let i = 0; i < 10; i++) {
+      const p = getRandomHistoricalPick();
+      const test = p.match ? finalToHighlight(p.match, "") : { id: `historic-${Date.now()}`, title: p.title, league: `${p.tournament} ${p.year}`, homeTeam: p.match?.homeTeam || "", awayTeam: p.match?.awayTeam || "", year: p.year, tournament: p.tournament };
+      if (!isAlreadyPosted(test, posted)) { reroll = p; break; }
+    }
+    if (reroll) {
+      console.log(`[HISTORICAL MODE] Re-rolled fresh pick: ${reroll.tournament} ${reroll.year} — ${reroll.title}`);
+      historicPick = reroll;
+      const base = reroll.match ? finalToHighlight(reroll.match, highlights[0]?.videoUrl || highlights[0]?.embedUrl || "") : highlights[0];
+      fresh = [{ ...base, query: reroll.query, year: reroll.year, tournament: reroll.tournament, source: "historical-yt-dlp" }];
+    } else {
+      console.log(`[HISTORICAL MODE] No fresh match found after 10 re-rolls — skipping run (no duplicate).`);
+      fresh = [];
+    }
   } else {
     fresh = freshRaw.slice(0, config.maxHighlightsPerRun * 3);
   }
@@ -374,8 +522,9 @@ async function main() {
           try {
             // Use dump-json for high-liked sorting
             let cands = [];
+            const cFlag = getYtDlpCookiesFlag();
             try {
-              const jout = _exec(`yt-dlp "ytsearch10:${h.query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+              const jout = _exec(`yt-dlp ${cFlag} "ytsearch10:${h.query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
               for (const line of jout.split("\n").filter(Boolean)) {
                 if (!line.trim().startsWith("{")) continue;
                 try { const j=JSON.parse(line); if(j.id) cands.push({ id:j.id, title:j.title||"", thumbnail:j.thumbnail||`https://img.youtube.com/vi/${j.id}/hqdefault.jpg`, view_count:j.view_count||0, like_count:j.like_count||0, comment_count:j.comment_count||0 }); } catch {}
@@ -386,7 +535,7 @@ async function main() {
               cands=pool.length?pool:cands;
             } catch {}
             if (!cands.length) {
-              const out = _exec(`yt-dlp "ytsearch5:${h.query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+              const out = _exec(`yt-dlp ${cFlag} "ytsearch5:${h.query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
               const lines = out.split("\n").filter(Boolean);
               for (let i = 0; i < lines.length - 1; i += 2) {
                 const title = lines[i]; const id = lines[i+1];
@@ -453,7 +602,17 @@ async function main() {
     if (!mediaUrls.length && localVideoPath) mediaUrls = [localVideoPath];
     if (!mediaUrls.length) {
       console.warn(`[VIDEO REEL ONLY] Skipping ${h.title} — no video file available (YouTube links are not posted). Need local video file.`);
-      continue;
+      console.log(`[cached fallback] Attempting to pick cached watermarked reel from /tmp/wm_*.mp4...`);
+      const fallback = pickCachedFallbackReel(posted);
+      if (fallback) {
+        console.log(`[cached fallback] ✓ Picked cached reel: ${fallback.path} (${fallback.highlight.title})`);
+        h = fallback.highlight;
+        localVideoPath = fallback.path;
+        mediaUrls = [fallback.path];
+      } else {
+        console.warn(`[VIDEO REEL ONLY] No cached fallback reel available either — skipping`);
+        continue;
+      }
     }
 
     // === Logo mandatory check before presign: requireTournamentLogo must succeed and PNG valid, else skip candidate ===
@@ -504,24 +663,28 @@ async function main() {
       if (!fileForUpload || !fs.existsSync(fileForUpload)) throw new Error(`no local video file for strict upload: ${fileForUpload}`);
       let sz = fs.statSync(fileForUpload).size;
       if (sz < 1_000_000) throw new Error(`video file too small ${sz} < 1M`);
-      // Watermark: extended canvas 110px above video, logo mandatory, profile pic top-right
-      const { requireTournamentLogo } = await import("./config.js");
-      const tourn = h.tournament || h.league || "";
-      const yr = h.year || (h.date ? new Date(h.date).getFullYear() : 2024);
-      const logoPath = requireTournamentLogo(tourn, yr);
-      let profilePic = "/tmp/page_profile.jpg";
-      if (!fs.existsSync(profilePic) || fs.statSync(profilePic).size < 1000) {
-        try { execSync(`ffmpeg -y -f lavfi -i color=c=white:s=140x140 -frames:v 1 "${profilePic}" 2>/dev/null`, {timeout:10000}); } catch {}
+      if (!h.isCachedWm && !path.basename(fileForUpload).startsWith("wm_")) {
+        // Watermark: extended canvas 110px above video, logo mandatory, profile pic top-right
+        const { requireTournamentLogo } = await import("./config.js");
+        const tourn = h.tournament || h.league || "";
+        const yr = h.year || (h.date ? new Date(h.date).getFullYear() : 2024);
+        const logoPath = requireTournamentLogo(tourn, yr);
+        let profilePic = "/tmp/page_profile.jpg";
+        if (!fs.existsSync(profilePic) || fs.statSync(profilePic).size < 1000) {
+          try { execSync(`ffmpeg -y -f lavfi -i color=c=white:s=140x140 -frames:v 1 "${profilePic}" 2>/dev/null`, {timeout:10000}); } catch {}
+        }
+        const watermarked = `/tmp/wm_${String(h.id).replace(/[^a-zA-Z0-9_-]/g,"_")}.mp4`;
+        console.log(`[watermark] Applying HIGH UP bar 110px + logo ${logoPath} to ${fileForUpload} → ${watermarked}`);
+        applyDynamicWatermark(fileForUpload, {
+          tournament: tourn || "Football", year: yr, teamA: h.homeTeam||"Team A", teamB: h.awayTeam||"Team B", stage: h.stage||h.match?.stage||"Highlights",
+          logoPath, watermarkPath: profilePic, output: watermarked, headerHeight:110, logoScaleH:100, logoPos:"left", watermarkPos:"top-right", watermarkSize:140, watermarkAlpha:0.6, crf:30, autoDetect:false,
+        });
+        fileForUpload = watermarked;
+        // Update localVideoPath to watermarked for later validation checks
+        localVideoPath = watermarked;
+      } else {
+        console.log(`[watermark] Video is already watermarked: ${fileForUpload}`);
       }
-      const watermarked = `/tmp/wm_${String(h.id).replace(/[^a-zA-Z0-9_-]/g,"_")}.mp4`;
-      console.log(`[watermark] Applying HIGH UP bar 110px + logo ${logoPath} to ${fileForUpload} → ${watermarked}`);
-      applyDynamicWatermark(fileForUpload, {
-        tournament: tourn || "Football", year: yr, teamA: h.homeTeam||"Team A", teamB: h.awayTeam||"Team B", stage: h.stage||h.match?.stage||"Highlights",
-        logoPath, watermarkPath: profilePic, output: watermarked, headerHeight:110, logoScaleH:100, logoPos:"left", watermarkPos:"top-right", watermarkSize:140, watermarkAlpha:0.6, crf:30, autoDetect:false,
-      });
-      fileForUpload = watermarked;
-      // Update localVideoPath to watermarked for later validation checks
-      localVideoPath = watermarked;
       sz = fs.statSync(fileForUpload).size;
       console.log(`[strict] Presigning upload for watermarked ${fileForUpload} (${Math.round(sz/1024/1024)}MB)...`);
       strictMediaUrl = await presignUploadStrict(fileForUpload);
@@ -692,7 +855,11 @@ async function main() {
     posted.add(h.id);
     for(const k of highlightPostedKeys(h)) posted.add(k);
     savePosted(posted);
+    const ts = new Date().toISOString().slice(0,16).replace('T',' ');
+    const logLine = `[${ts} UTC] VIDEO REEL POSTED: ${h.title} — POST _id=${postId} SUCCESS (${strictMediaUrl})\n`;
+    try { fs.appendFileSync("/home/john/dev/football-maxx-poster/cron.log", logLine); } catch {}
   }
+  await deduplicateRecentPosts();
   console.log("Done. Posted IDs saved to posted.json");
 }
 

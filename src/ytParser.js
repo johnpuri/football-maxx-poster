@@ -52,7 +52,15 @@ function cleanTeam(s){
     .replace(/^highlights\s*[-:]/i,"")
     .replace(/\s+highlights.*/i,"")
     .replace(/\s*\|\s*.*/,"")
+    .replace(/\s*-\s*(full|extended|official|hd|4k)(\s+highlights.*)?\s*$/i,"")
     .replace(/\s*-\s*highlights.*/i,"")
+    // strip tournament/year/stage pollution so dedup keys stay clean
+    // ("UEFA EURO 2004 England", "Semi Real Madrid", "Spain 4-0", "EnglandEuro2004highlights2")
+    .replace(/\b(uefa|fifa|euro|european|world|champions|league|cup|copa|america|ucl|epl|laliga|la liga|premier|bundesliga|serie|ligue|europa|final|semi[\s-]?final|quarter[\s-]?final|round\s+of\s+16|group\s+stage|regular\s+season|knockout|playoff)\b/gi," ")
+    .replace(/\b(19|20)\d{2}(\/\d{2})?\b/g," ")
+    .replace(/\bhighlights?\d*\b/gi," ")
+    .replace(/\s+\d+\s*[-–—:x]\s*\d+\s*$/," ")
+    .replace(/\s+[a-z]*\d+[a-z0-9]*$/i," ")
     .trim()
     .split(/\s+/).slice(0,4).join(" ")
     .trim();
