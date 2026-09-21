@@ -436,37 +436,51 @@ function extractYoutubeId(url) {
  * Iterate ytsearch candidates 1-5, download and validate until valid highlight found.
  * Returns { highlight, videoPath, validResult } or null if none valid.
  */
-export async function pickValidHighlightFromCandidates(query, baseHighlight, downloadFn) {
+export async function pickValidHighlightFromCandidates(query, originalHighlight, downloadFn) {
   const { execSync } = await import("child_process");
   const { isCartoonVideo } = await import("./cartoonFilter.js");
+  const baseHighlight = originalHighlight;
+
+  function getYtDlpCookiesFlag() {
+    return `--cookies-from-browser chrome`;
+  }
+
   function parseDumpJson(out) {
     const cands = [];
     for (const line of out.split("\n").filter(Boolean)) {
-      if (!line.trim().startsWith("{")) continue;
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
       try {
-        const j = JSON.parse(line);
+        const j = JSON.parse(trimmed);
         if (!j.id) continue;
-        cands.push({ id: j.id, title: j.title || "", thumbnail: j.thumbnail || `https://img.youtube.com/vi/${j.id}/hqdefault.jpg`, uploader: j.uploader || j.uploader_id || "", view_count: j.view_count||0, like_count: j.like_count||0, comment_count: j.comment_count||0 });
+        cands.push({
+          id: j.id,
+          title: j.title || j.fulltitle || "",
+          view_count: j.view_count ?? j.viewCount ?? 0,
+          like_count: j.like_count ?? j.likeCount ?? 0,
+          comment_count: j.comment_count ?? j.commentCount ?? 0,
+          uploader: j.uploader || j.uploader_id || j.channel || "",
+          thumbnail: j.thumbnail || `https://img.youtube.com/vi/${j.id}/hqdefault.jpg`,
+        });
       } catch {}
     }
-    // sort by view_count desc like index.js
-    cands.sort((a,b) => (b.view_count||0)-(a.view_count||0) || (b.like_count||0)-(a.like_count||0));
-    // filter high-liked >=10k views, prefer >50k or >1k likes
+    cands.sort((a,b) => (b.view_count||0) - (a.view_count||0) || (b.like_count||0) - (a.like_count||0));
     const hi = cands.filter(c => (c.view_count||0)>=10000 && ((c.view_count>50000)||(c.like_count>1000)||(c.comment_count>200)));
     const pool = hi.length ? hi : cands.filter(c=>(c.view_count||0)>=10000);
     return (pool.length?pool:cands);
   }
   let candidates = [];
+  const cookiesFlag = getYtDlpCookiesFlag();
   // Try dump-json first (10 candidates sorted by popularity)
   try {
-    let out = execSync(`yt-dlp "ytsearch10:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+    let out = execSync(`yt-dlp ${cookiesFlag} "ytsearch10:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
     if (out) candidates = parseDumpJson(out);
   } catch {}
   if (!candidates.length) {
     // Fallback to old title/id
     let out = "";
     try {
-      out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+      out = execSync(`yt-dlp ${cookiesFlag} "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
     } catch { return null; }
     const lines = out.split("\n").filter(Boolean);
     for (let i = 0; i < lines.length - 1; i += 2) {

@@ -19,34 +19,13 @@ import { execSync } from "child_process";
 import { applyDynamicWatermark } from "./watermark.js";
 
 export function getYtDlpCookiesFlag() {
-  const cookiePath = "/tmp/youtube_cookies.txt";
-  if (fs.existsSync(cookiePath) && fs.statSync(cookiePath).size > 100) {
-    return `--cookies "${cookiePath}"`;
-  }
-  return "";
+  // Real logged-in Chrome profile cookies (verified 2026-09-21) — anonymous
+  // headless-playwright cookies from get_cookies.mjs are bot-walled, don't use them.
+  return `--cookies-from-browser chrome`;
 }
 
 export function refreshCookiesIfNeeded(force = false) {
-  const cookiePath = "/tmp/youtube_cookies.txt";
-  let needsRefresh = force || !fs.existsSync(cookiePath);
-  if (!needsRefresh) {
-    try {
-      const st = fs.statSync(cookiePath);
-      if (st.size < 100 || (Date.now() - st.mtimeMs > 6 * 3600 * 1000)) {
-        needsRefresh = true;
-      }
-    } catch {
-      needsRefresh = true;
-    }
-  }
-  if (needsRefresh) {
-    try {
-      console.log("[cookies] Refreshing /tmp/youtube_cookies.txt via get_cookies.mjs...");
-      execSync("node get_cookies.mjs", { timeout: 45000, cwd: "/home/john/dev/football-maxx-poster" });
-    } catch (e) {
-      console.warn("[cookies] Failed to refresh cookies:", e.message);
-    }
-  }
+  // No-op: --cookies-from-browser reads the live profile directly, no refresh needed.
   return getYtDlpCookiesFlag();
 }
 
@@ -425,7 +404,8 @@ export async function tryYtDlpSearchFiltered(query) {
   }
   // Fallback to old path
   try {
-    const out = execSync(`yt-dlp "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
+    const cFlag = getYtDlpCookiesFlag();
+    const out = execSync(`yt-dlp ${cFlag} "ytsearch5:${query}" --get-id --get-title --no-warnings 2>/dev/null | head -n 20`, { timeout: 20000, encoding: "utf8" }).trim();
     const lines = out.split("\n").filter(Boolean);
     const candidates = [];
     for (let i = 0; i < lines.length - 1; i += 2) {
