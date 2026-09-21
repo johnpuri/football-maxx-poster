@@ -312,7 +312,7 @@ function getCandidatesViaDumpJson(query, count=10) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       // 2>&1 keeps ERROR lines visible; the JSON parser skips non-{ lines
-      const out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      const out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings --ignore-errors --no-abort-on-error 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
       const cands = parseYtDlpJsonOutput(out);
       if (cands.length) {
         if (attempt > 1) console.log(`[yt-dlp] dump-json succeeded on attempt ${attempt}`);
@@ -508,7 +508,7 @@ async function main() {
             let cands = [];
             const cFlag = getYtDlpCookiesFlag();
             try {
-              const jout = _exec(`yt-dlp ${cFlag} "ytsearch10:${h.query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 30000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+              const jout = _exec(`yt-dlp ${cFlag} "ytsearch10:${h.query}" --dump-json --no-warnings --ignore-errors --no-abort-on-error 2>/dev/null`, { timeout: 30000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
               for (const line of jout.split("\n").filter(Boolean)) {
                 if (!line.trim().startsWith("{")) continue;
                 try { const j=JSON.parse(line); if(j.id) cands.push({ id:j.id, title:j.title||"", thumbnail:j.thumbnail||`https://img.youtube.com/vi/${j.id}/hqdefault.jpg`, view_count:j.view_count||0, like_count:j.like_count||0, comment_count:j.comment_count||0 }); } catch {}
