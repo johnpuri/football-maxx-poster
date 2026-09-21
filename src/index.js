@@ -305,23 +305,26 @@ function filterAndSortByPopularity(candidates) {
   }
   return sortPool;
 }
+function sleepSync(ms) { try { require("child_process").execSync(`sleep ${Math.ceil(ms / 1000)}`); } catch {} }
 function getCandidatesViaDumpJson(query, count=10) {
-  try {
-    let cookiesFlag = refreshCookiesIfNeeded();
-    let out = "";
+  const cookiesFlag = refreshCookiesIfNeeded();
+  let lastErr = "";
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
-    } catch {
-      // Retry once with refreshed cookies
-      cookiesFlag = refreshCookiesIfNeeded(true);
-      out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings 2>/dev/null`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      // 2>&1 keeps ERROR lines visible; the JSON parser skips non-{ lines
+      const out = execSync(`yt-dlp ${cookiesFlag} "ytsearch${count}:${query}" --dump-json --no-warnings 2>&1`, { timeout: 60000, encoding: "utf8", maxBuffer: 15*1024*1024 }).trim();
+      const cands = parseYtDlpJsonOutput(out);
+      if (cands.length) {
+        if (attempt > 1) console.log(`[yt-dlp] dump-json succeeded on attempt ${attempt}`);
+        return filterAndSortByPopularity(cands);
+      }
+      lastErr = "no candidates parsed";
+    } catch (e) {
+      lastErr = (e.stdout || e.message || "").toString().slice(0,300);
     }
-    if (!out) return [];
-    const cands = parseYtDlpJsonOutput(out);
-    if (cands.length) return filterAndSortByPopularity(cands);
-  } catch (e) {
-    console.warn(`[yt-dlp] dump-json failed for "${query}": ${e.message?.slice(0,200)}`);
+    if (attempt < 3) { console.warn(`[yt-dlp] dump-json attempt ${attempt}/3 failed for "${query}": ${lastErr.slice(0,150)} — retrying in 10s`); sleepSync(10000); }
   }
+  console.warn(`[yt-dlp] dump-json failed for "${query}" after 3 attempts: ${lastErr.slice(0,200)}`);
   return [];
 }
 
